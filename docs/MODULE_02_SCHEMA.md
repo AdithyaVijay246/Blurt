@@ -128,9 +128,18 @@ fast exact-match filtering, complementing (not replacing) semantic search.
     or revoking an unlock method (e.g. a cross-device passphrase reset,
     §5) only touches that slot's small wrapped-key blob — it never
     requires re-encrypting the database itself.
-- Neither the passphrase nor the recovery key is ever stored — only their
-  wrapped-key outputs, and the unwrapped master key transiently in memory
-  while the app is unlocked.
+- The passphrase is never stored at all. Neither secret is ever stored
+  *outside* the encrypted database — the keyring file beside it holds only
+  their wrapped-key outputs, and the unwrapped master key exists transiently
+  in memory while the app is unlocked.
+- **The recovery key is stored inside the SQLCipher database** (an
+  `app_secrets` row), so Settings can re-display it as
+  `MODULE_06_UI_SHELL.md` §D2 requires. That re-display is gated on the app
+  being unlocked *and* a fresh auth check passing — a bar that already grants
+  access to every secret in the store, so surfacing the recovery key behind it
+  concedes nothing. An earlier revision of this section said the recovery key
+  was never stored at all, which was irreconcilable with §D2; this is the
+  resolution.
 - Primary keys are UUIDs — no special handling needed under whole-DB
   encryption.
 
@@ -238,10 +247,14 @@ Blurt itself):
    master key, it's just wrapping it under a new passphrase. Covers the
    common case: locked out of one device, not all of them.
 2. **Recovery key.** A randomly-generated key, independent of the
-   passphrase, shown once during onboarding and never stored by the app.
+   passphrase, shown during onboarding and retained only inside the
+   encrypted database (§3), never on disk in the clear and never outside it.
    Wraps the master key in its own slot (§3), so it can unlock the data
    even if every device's passphrase and cached credentials are gone.
    Last-resort path, if every device is lost/reset simultaneously.
+   Note the circularity this implies: the stored copy is readable only once
+   the database is already open, so it serves re-display (§D2), not recovery.
+   Recovery still depends entirely on the user having saved it externally.
 3. If **both** paths are unavailable (recovery key never saved, and no
    other device is reachable), the data is genuinely, permanently
    unrecoverable — the irreducible tradeoff of real zero-knowledge

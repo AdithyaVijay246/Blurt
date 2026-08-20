@@ -65,7 +65,7 @@ Deferred beyond that pass: wiring `blurt-app` commands, and Modules 3-6.
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Stub only** | `builder()` returns a bare `tauri::Builder`; no commands registered |
 
-**44 tests green** across the workspace as of the last commit. Test command
+**46 tests green** across the workspace as of the last commit. Test command
 (note the PATH requirement under Environment below):
 
 ```bash
@@ -87,12 +87,15 @@ them. Each follows a pattern the docs already establish, but none is stated in
 one.
 
 1. **Recovery key is stored inside the encrypted database** (`app_secrets`
-   table). `MODULE_02_SCHEMA.md` §3/§5 says it is "never stored", but
+   table). `MODULE_02_SCHEMA.md` §3/§5 originally said it was "never stored", but
    `MODULE_06_UI_SHELL.md` §D2 requires Settings to re-display it — a direct
    contradiction. Resolved in favor of storing it inside SQLCipher: plaintext
    nowhere on disk, readable only when unlocked *and* past a fresh auth check.
-   **Open action:** amend §3/§5 to read "never stored outside the encrypted
-   database" so the two docs stop disagreeing.
+   `MODULE_02_SCHEMA.md` §3 and §5 have been amended to match, so the docs no
+   longer disagree. Note the circularity §5 now spells out: the stored copy is
+   readable only once the database is already open, so it serves §D2
+   re-display, *not* recovery — real recovery still depends on the user having
+   saved the key externally.
 
 2. **Keyslots live in a separate `keyring.json`, not in the database.** The
    wrapped-key blobs cannot live inside the database they unlock. The file is
@@ -182,6 +185,6 @@ Newest first. One short entry per session — what changed, not how.
   all §2 tables written. `db.rs`/`migrations.rs` tests written and Red.
 - `git init`, first commit, pushed to the public GitHub remote. Added
   `.gitattributes` to normalize line endings across platforms.
-- Finished `db.rs` + `migrations.rs`. **44 tests green**, `cargo build` clean,
+- Finished `db.rs` + `migrations.rs`. **46 tests green**, `cargo build` clean,
   `npm run tauri dev` still opens a window. Module 2 is complete except for the
   repository/CRUD layer.

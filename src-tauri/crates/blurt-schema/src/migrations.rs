@@ -94,9 +94,72 @@ mod tests {
     #[test]
     fn creates_every_table_from_the_schema_doc() {
         let db = migrated();
-        for table in ["destinations", "items", "edits", "embeddings", "keywords"] {
+        for table in [
+            "destinations",
+            "items",
+            "edits",
+            "embeddings",
+            "keywords",
+            "app_secrets",
+        ] {
             assert!(table_exists(&db, table), "missing table {table}");
         }
+    }
+
+    /// `app_secrets` is where the recovery key lives so Settings can
+    /// re-display it (`MODULE_06_UI_SHELL.md` §D2). Its whole security
+    /// argument is that it sits inside the encrypted file, so verify that
+    /// directly rather than assuming it.
+    #[test]
+    fn app_secrets_content_is_not_readable_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blurt.db");
+        let master = MasterKey::generate();
+        let secret = "SENTINEL-RECOVERY-KEY-VALUE";
+
+        {
+            let db = Database::open(&path, &master).unwrap();
+            run(db.conn()).unwrap();
+            db.conn()
+                .execute(
+                    "INSERT INTO app_secrets (key, value) VALUES ('recovery_key', ?1)",
+                    [secret],
+                )
+                .unwrap();
+        }
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()),
+            "the recovery key is readable in the database file"
+        );
+
+        // ...and still retrievable by someone holding the master key.
+        let db = Database::open(&path, &master).unwrap();
+        let stored: String = db
+            .conn()
+            .query_row(
+                "SELECT value FROM app_secrets WHERE key = 'recovery_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, secret);
+    }
+
+    #[test]
+    fn app_secrets_keys_are_unique() {
+        let db = migrated();
+        db.conn()
+            .execute("INSERT INTO app_secrets (key, value) VALUES ('recovery_key', 'a')", [])
+            .unwrap();
+        let duplicate = db.conn().execute(
+            "INSERT INTO app_secrets (key, value) VALUES ('recovery_key', 'b')",
+            [],
+        );
+        assert!(duplicate.is_err(), "a second recovery_key row was accepted");
     }
 
     /// §1: Unsorted is not a special structure — it is an ordinary row with
