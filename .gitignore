@@ -4,3 +4,6 @@ src-tauri/target/
 src-tauri/gen/
 *.log
 .DS_Store
+
+# Machine-specific Claude Code settings — not shared.
+.claude/settings.local.json

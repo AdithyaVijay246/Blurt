@@ -20,16 +20,32 @@ pub const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Reads the current schema version.
 pub fn current_version(conn: &Connection) -> Result<i64> {
-    let _ = conn;
-    todo!("read user_version")
+    let version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    Ok(version)
 }
 
 /// Applies every migration newer than the database's current version.
 ///
 /// Idempotent: running it against an up-to-date database is a no-op.
 pub fn run(conn: &Connection) -> Result<()> {
-    let _ = conn;
-    todo!("run migrations")
+    let current = current_version(conn)?;
+
+    for (index, sql) in MIGRATIONS.iter().enumerate() {
+        let version = index as i64 + 1;
+        if version <= current {
+            continue;
+        }
+
+        // Each migration and its version bump land together or not at all, so
+        // a failure part-way through can't leave the schema half-applied with
+        // a user_version claiming otherwise.
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", version)?;
+        tx.commit()?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

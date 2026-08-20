@@ -24,26 +24,29 @@ Last updated: 2026-08-20
 
 ## Resume here
 
-**Next action:** implement `blurt-schema`'s `db.rs` and `migrations.rs` to turn
-the current Red run Green.
+**Next action:** the `blurt-schema` repository/CRUD layer — the last piece of
+Module 2 before `blurt-app` can expose any Tauri command.
 
-- `db.rs` — SQLCipher open/unlock. Raw-key form (`PRAGMA key = "x'<64 hex>'"`),
-  applied as the first statement on the connection, followed immediately by a
-  probe read of `sqlite_master`. The probe is not optional: SQLCipher accepts a
-  wrong key silently and only fails at first read, so without it `open()`
-  returns a handle that explodes somewhere unrelated later. Convert probe
-  failure into `SchemaError::DatabaseLocked`. Also set `PRAGMA foreign_keys = ON`.
-- `migrations.rs` — runner keyed on `PRAGMA user_version`. The DDL is already
-  written at `crates/blurt-schema/migrations/0001_initial.sql`; only the runner
-  is missing.
+Nothing is written for it yet; start with tests, as with everything else here.
+What it needs to cover, all from `MODULE_02_SCHEMA.md`:
 
-16 tests are already written and currently failing on `todo!()`. They define
-the expected behavior — read them first.
+- **Destinations** — create, rename, reparent, tombstone. Path strings are
+  *computed on read* by walking `parentId`, never stored (§1).
+- **Items** — capture, move between destinations, check/uncheck. Capture must
+  always land in a real destination or the `isSystem` Unsorted one; there is no
+  unrouted state.
+- **Edits** — append-only. Writing an edit appends an `edits` row *and* updates
+  the denormalized `items.currentText`; `originalText` is never touched.
+- **Deletes** — set `deletedAt`. Never `DELETE FROM`. Every read path must
+  filter tombstones.
+- **Sensitive-safe accessors** — the queries that feed embedding and keyword
+  extraction must exclude `isSensitive` destinations *structurally*, so a
+  caller cannot forget the filter. This is the one place in the crate where a
+  mistake silently violates a core guarantee, so test it directly: assert that
+  an indexing query over a database containing sensitive items returns none of
+  them.
 
-After Green: the Step 6 verification pass (full `cargo test --workspace`,
-confirm `blurt.db` has no plaintext `SQLite format 3` header, confirm
-`npm run tauri dev` still opens a window). Then **stop** — the repository/CRUD
-layer is deliberately a separate pass.
+Deferred beyond that pass: wiring `blurt-app` commands, and Modules 3-6.
 
 ---
 
@@ -53,20 +56,27 @@ layer is deliberately a separate pass.
 |---|---|---|
 | Repo scaffold | **Done, verified** | Workspace builds clean; `npm run tauri dev` opens a blank window |
 | Frontend skeleton (`src/`) | **Stub only** | Blank `App.tsx`; `npm run build` passes. No Module 6 work started |
-| `blurt-schema` — keyring | **Done, 28 tests green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
-| `blurt-schema` — DDL | **Written, untested** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
-| `blurt-schema` — db/migrations | **Red — tests written, `todo!()` bodies** | 16 failing tests; this is the resume point |
-| `blurt-schema` — repository/CRUD | **Not started** | Deliberately deferred to its own pass |
+| `blurt-schema` — keyring | **Done, green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
+| `blurt-schema` — DDL | **Done, green** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
+| `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
+| `blurt-schema` — repository/CRUD | **Not started** | This is the resume point |
 | `blurt-router` (M3) | **Empty stub** | |
 | `blurt-rag` (M4) | **Empty stub** | |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Stub only** | `builder()` returns a bare `tauri::Builder`; no commands registered |
 
-Test command (note the PATH requirement under Environment below):
+**44 tests green** across the workspace as of the last commit. Test command
+(note the PATH requirement under Environment below):
 
 ```bash
 cargo test -p blurt-schema
 ```
+
+Two bits of expected noise in that output, neither a problem:
+`ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1` is SQLCipher
+logging the wrong-key rejection during `wrong_key_is_rejected_at_open_not_later`
+— it is the test working. And `LNK4099` warnings are OpenSSL's static lib
+shipping without PDB debug info.
 
 ---
 
@@ -170,3 +180,8 @@ Newest first. One short entry per session — what changed, not how.
   `npm run tauri dev` opens a blank window.
 - `blurt-schema`: keyring + recovery implemented TDD, 28 tests green. DDL for
   all §2 tables written. `db.rs`/`migrations.rs` tests written and Red.
+- `git init`, first commit, pushed to the public GitHub remote. Added
+  `.gitattributes` to normalize line endings across platforms.
+- Finished `db.rs` + `migrations.rs`. **44 tests green**, `cargo build` clean,
+  `npm run tauri dev` still opens a window. Module 2 is complete except for the
+  repository/CRUD layer.

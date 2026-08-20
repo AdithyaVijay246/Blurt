@@ -45,14 +45,26 @@ impl std::fmt::Debug for Database {
 impl Database {
     /// Opens the encrypted database at `path`, creating it if absent.
     pub fn open(path: &Path, master: &MasterKey) -> Result<Self> {
-        let _ = (path, master);
-        todo!("open encrypted database")
+        Self::from_connection(Connection::open(path)?, master)
     }
 
     /// Opens an encrypted in-memory database. Used by tests.
     pub fn open_in_memory(master: &MasterKey) -> Result<Self> {
-        let _ = master;
-        todo!("open in-memory encrypted database")
+        Self::from_connection(Connection::open_in_memory()?, master)
+    }
+
+    fn from_connection(conn: Connection, master: &MasterKey) -> Result<Self> {
+        Self::key_and_verify(&conn, master)?;
+
+        // Must come after keying. Off by default in SQLite, and Module 2's
+        // parentId / destinationId / itemId relationships are only meaningful
+        // if they're enforced.
+        //
+        // Module 5 note: applying CRDT updates out of order may need these
+        // deferred. Flagging, not solving, until blurt-sync exists.
+        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+
+        Ok(Self { conn })
     }
 
     /// Borrows the underlying connection.
@@ -66,8 +78,20 @@ impl Database {
 
     /// Applies the key and verifies it actually decrypts.
     fn key_and_verify(conn: &Connection, master: &MasterKey) -> Result<()> {
-        let _ = (conn, master);
-        todo!("apply key and verify")
+        // Raw-key form: the `x'...'` literal tells SQLCipher to use these 32
+        // bytes directly rather than running its own KDF over them. Not
+        // parameterizable — PRAGMA values can't be bound — but the input is
+        // our own hex encoding of a fixed-size array, never user text.
+        conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", master.to_hex()))?;
+
+        // The actual verification. Keying always "succeeds"; a wrong key only
+        // surfaces when something tries to read a page.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| SchemaError::DatabaseLocked)?;
+
+        Ok(())
     }
 }
 
