@@ -159,6 +159,16 @@ one.
 - **First build of `blurt-schema` compiles OpenSSL and SQLCipher from source**
   and takes several minutes. Incremental rebuilds after that are seconds.
 
+- **`rust-analyzer` needs installing before any LSP plugin will work.**
+  `rust-analyzer.exe` is present in `~/.cargo/bin` but it is only a rustup
+  shim — the component itself is missing, so invoking it fails with "Unknown
+  binary 'rust-analyzer.exe' in official toolchain". `rust-src` is missing too,
+  and without it the server cannot resolve into `std`:
+
+  ```bash
+  rustup component add rust-analyzer rust-src
+  ```
+
 - Toolchain installed: Node 24.19.0, Rust 1.97.1, MSVC 14.44 + Windows 11 SDK,
   Strawberry Perl 5.42.2, NASM 2.16.01. WebView2 runtime was already present.
 
