@@ -159,15 +159,28 @@ one.
 - **First build of `blurt-schema` compiles OpenSSL and SQLCipher from source**
   and takes several minutes. Incremental rebuilds after that are seconds.
 
-- **`rust-analyzer` needs installing before any LSP plugin will work.**
-  `rust-analyzer.exe` is present in `~/.cargo/bin` but it is only a rustup
-  shim — the component itself is missing, so invoking it fails with "Unknown
-  binary 'rust-analyzer.exe' in official toolchain". `rust-src` is missing too,
-  and without it the server cannot resolve into `std`:
+- **LSP is set up — `rust-analyzer` 1.97.1 plus the
+  `rust-analyzer@claude-code-lsps` plugin (user scope).** Install these from
+  the CLI, not the `/plugin` panel, which the model cannot drive:
 
   ```bash
-  rustup component add rust-analyzer rust-src
+  claude plugin marketplace add boostvolt/claude-code-lsps
+  claude plugin install rust-analyzer@claude-code-lsps
   ```
+
+  Watch out: `~/.cargo/bin/rust-analyzer.exe` exists even when the component
+  does not — it is a rustup shim that fails with "Unknown binary
+  'rust-analyzer.exe' in official toolchain". Presence on `PATH` proves
+  nothing; run `rust-analyzer --version` to actually check.
+
+  `rust-src` is installed and resolves under the sysroot, but its files came
+  from a pre-existing vendored source tree rather than rustup, so
+  `rustup component add rust-src` may report a conflict on
+  `library/.cargo/config.toml`. Harmless unless std completions ever disagree
+  with the toolchain version; to make rustup own them, `rustup component
+  remove rust-src`, delete `lib/rustlib/src`, then add it back.
+
+- **`vtsls` is not installed.** Add it when Module 6 frontend work starts.
 
 - Toolchain installed: Node 24.19.0, Rust 1.97.1, MSVC 14.44 + Windows 11 SDK,
   Strawberry Perl 5.42.2, NASM 2.16.01. WebView2 runtime was already present.
