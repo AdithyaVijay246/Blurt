@@ -1,0 +1,16 @@
+[package]
+name = "blurt-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tauri = { workspace = true }
+
+# Domain crates. blurt-app is the adapter that calls into these; it holds no
+# business logic of its own (docs/MODULE_01_ARCHITECTURE.md §2).
+blurt-schema = { workspace = true }
+blurt-router = { workspace = true }
+blurt-rag = { workspace = true }
+blurt-sync = { workspace = true }

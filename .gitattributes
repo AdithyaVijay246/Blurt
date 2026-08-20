@@ -1,0 +1,18 @@
+# Normalize line endings. Blurt targets Windows, macOS, Linux, iOS, and
+# Android; without this, checkouts on different platforms produce spurious
+# whole-file diffs.
+* text=auto eol=lf
+
+# Windows-only files that must keep CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Binary — never touch these.
+*.png  binary
+*.ico  binary
+*.icns binary
+*.jpg  binary
+*.webp binary
+*.woff  binary
+*.woff2 binary
+*.gguf binary

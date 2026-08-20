@@ -1,0 +1,46 @@
+# Workspace root (docs/MODULE_01_ARCHITECTURE.md §2).
+#
+# This manifest is both the workspace root and the thin Tauri host binary.
+# The host crate exists only so `tauri.conf.json` sits at the conventional
+# `src-tauri/` location the Tauri CLI expects; it contains no logic beyond
+# `main()`. The Tauri builder and every `#[tauri::command]` live in
+# `crates/blurt-app`, per §2's "blurt-app is the seam where Tauri commands
+# call into the domain crates".
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+blurt-schema = { path = "crates/blurt-schema" }
+blurt-router = { path = "crates/blurt-router" }
+blurt-rag = { path = "crates/blurt-rag" }
+blurt-sync = { path = "crates/blurt-sync" }
+blurt-app = { path = "crates/blurt-app" }
+tauri = "2"
+tauri-build = "2"
+
+[package]
+name = "blurt"
+description = "Blurt — local-first, E2EE, zero-friction everything log"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "blurt"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true, features = [] }
+
+[dependencies]
+blurt-app = { workspace = true }
+tauri = { workspace = true }

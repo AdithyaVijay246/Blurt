@@ -1,0 +1,30 @@
+/*
+ * Placeholder base only.
+ *
+ * The real Appearance system (user-selectable accent / background / font,
+ * with foreground derived from background luminance) is Module 6 §D1 and is
+ * not implemented yet — it will own `src/theme/`. Nothing here or downstream
+ * may hardcode a color; components are written in relative terms
+ * (accent / background / muted-on-background).
+ */
+
+:root {
+  --blurt-background: #ffffff;
+  --blurt-accent: #4f46e5;
+  /* Derived from background luminance at runtime once §D1 lands. */
+  --blurt-foreground: #101014;
+}
+
+html,
+body,
+#root,
+.app-shell {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--blurt-background);
+  color: var(--blurt-foreground);
+  font-family: system-ui, sans-serif;
+}
