@@ -13,6 +13,7 @@ pub mod error;
 pub mod keyring;
 pub mod migrations;
 pub mod recovery;
+pub mod repository;
 
 pub use db::Database;
 pub use error::{Result, SchemaError};

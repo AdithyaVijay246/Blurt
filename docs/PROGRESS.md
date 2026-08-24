@@ -18,35 +18,32 @@ tracks that.
 
 Remote: `https://github.com/AdithyaVijay246/Blurt`
 
-Last updated: 2026-08-20
+Last updated: 2026-08-24
 
 ---
 
 ## Resume here
 
-**Next action:** the `blurt-schema` repository/CRUD layer — the last piece of
-Module 2 before `blurt-app` can expose any Tauri command.
+**Next action:** wire `blurt-schema`'s repository layer into `blurt-app` as
+Tauri commands. Module 2 itself (schema + keyring + repository/CRUD) is now
+complete.
 
-Nothing is written for it yet; start with tests, as with everything else here.
-What it needs to cover, all from `MODULE_02_SCHEMA.md`:
+The repository layer (`src/repository/{destinations,items,edits,indexing}.rs`)
+covers everything `MODULE_02_SCHEMA.md` specifies:
 
-- **Destinations** — create, rename, reparent, tombstone. Path strings are
-  *computed on read* by walking `parentId`, never stored (§1).
-- **Items** — capture, move between destinations, check/uncheck. Capture must
-  always land in a real destination or the `isSystem` Unsorted one; there is no
-  unrouted state.
-- **Edits** — append-only. Writing an edit appends an `edits` row *and* updates
-  the denormalized `items.currentText`; `originalText` is never touched.
-- **Deletes** — set `deletedAt`. Never `DELETE FROM`. Every read path must
-  filter tombstones.
-- **Sensitive-safe accessors** — the queries that feed embedding and keyword
-  extraction must exclude `isSensitive` destinations *structurally*, so a
-  caller cannot forget the filter. This is the one place in the crate where a
-  mistake silently violates a core guarantee, so test it directly: assert that
-  an indexing query over a database containing sensitive items returns none of
-  them.
+- **Destinations** — create, rename, reparent, tombstone, `path` (walks
+  `parentId` on read per §1 — never stored).
+- **Items** — capture, `move_to` (reparenting/resolving-Unsorted/dragging are
+  all this one write), `set_checked`, tombstone, `list_for_destination`.
+- **Edits** — `append` (one transaction: inserts the `edits` row and updates
+  `items.currentText`; `originalText` is never touched), `history_for_item`.
+- **Sensitive-safe accessor** — `indexing::items_for_indexing` joins
+  `items`/`destinations` and filters `isSensitive = 0` structurally in the
+  query itself. Covered directly:
+  `sensitive_destinations_items_are_structurally_excluded`.
 
-Deferred beyond that pass: wiring `blurt-app` commands, and Modules 3-6.
+`blurt-app` still has no registered commands — that's the next session's
+starting point. Modules 3-6 remain deferred beyond that.
 
 ---
 
@@ -59,13 +56,13 @@ Deferred beyond that pass: wiring `blurt-app` commands, and Modules 3-6.
 | `blurt-schema` — keyring | **Done, green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
 | `blurt-schema` — DDL | **Done, green** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
-| `blurt-schema` — repository/CRUD | **Not started** | This is the resume point |
+| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,indexing}.rs` |
 | `blurt-router` (M3) | **Empty stub** | |
 | `blurt-rag` (M4) | **Empty stub** | |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Stub only** | `builder()` returns a bare `tauri::Builder`; no commands registered |
 
-**46 tests green** across the workspace as of the last commit. Test command
+**67 tests green** across the workspace as of the last commit. Test command
 (note the PATH requirement under Environment below):
 
 ```bash
@@ -142,6 +139,16 @@ one.
     app-level idle timer, biometric integration — belongs to `blurt-app` and
     Module 6.
 
+11. **`repository/` is a directory, not a flat file** — the one place this
+    crate breaks from the otherwise-flat `src/*.rs` layout. The CRUD surface
+    (destinations + items + edits + a sensitive-safe accessor) was bigger than
+    any existing single file; split into `repository/{destinations,items,edits,
+    indexing}.rs` instead. Repository functions take `&rusqlite::Connection`
+    directly (via `Database::conn()`) rather than wrapping it, matching
+    `migrations::run`'s existing shape. Read accessors return
+    `Result<Option<T>>` via `rusqlite`'s `OptionalExtension`, not a `NotFound`
+    error variant — missing-by-id isn't exceptional here.
+
 ---
 
 ## Environment / build gotchas
@@ -211,3 +218,11 @@ Newest first. One short entry per session — what changed, not how.
 - Finished `db.rs` + `migrations.rs`. **46 tests green**, `cargo build` clean,
   `npm run tauri dev` still opens a window. Module 2 is complete except for the
   repository/CRUD layer.
+
+### 2026-08-24
+- Built the `blurt-schema` repository/CRUD layer, TDD throughout (Red
+  confirmed via `todo!()` stubs before each implementation): `destinations`,
+  `items`, `edits`, then `indexing::items_for_indexing` (the sensitive-safe
+  accessor, tested directly against a seeded sensitive destination). **67
+  tests green**, workspace `cargo build` clean. Module 2 is now fully
+  complete — see decision #11 above for the `repository/` layout.
