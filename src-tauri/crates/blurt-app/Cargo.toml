@@ -7,6 +7,9 @@ publish.workspace = true
 
 [dependencies]
 tauri = { workspace = true }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.20"
+uuid = "1.24.1"
 
 # Domain crates. blurt-app is the adapter that calls into these; it holds no
 # business logic of its own (docs/MODULE_01_ARCHITECTURE.md §2).
@@ -14,3 +17,8 @@ blurt-schema = { workspace = true }
 blurt-router = { workspace = true }
 blurt-rag = { workspace = true }
 blurt-sync = { workspace = true }
+
+[dev-dependencies]
+# "test" feature gates the tauri::test mock-runtime module used by command tests.
+tauri = { workspace = true, features = ["test"] }
+serde_json = "1.0.151"

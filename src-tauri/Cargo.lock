@@ -230,7 +230,11 @@ dependencies = [
  "blurt-router",
  "blurt-schema",
  "blurt-sync",
+ "serde",
+ "serde_json",
  "tauri",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

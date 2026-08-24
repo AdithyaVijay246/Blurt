@@ -20,15 +20,33 @@ Remote: `https://github.com/AdithyaVijay246/Blurt`
 
 Last updated: 2026-08-24
 
+A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
+is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phase 1
+below is done; Phases 2-6 (router, indexing, retrieval, Sleep-Mode, final
+wiring) are still ahead. Read that plan file at the start of the next session
+rather than re-deriving the sequencing here.
+
 ---
 
 ## Resume here
 
-**Next action:** wire `blurt-schema`'s repository layer into `blurt-app` as
-Tauri commands. Module 2 itself (schema + keyring + repository/CRUD) is now
-complete.
+**Next action:** Phase 2 of the roadmap — Module 3 router (`blurt-router`),
+starting with a `list_children`/`list_top_level` addition to
+`blurt_schema::repository::destinations` (needed for the `@`-picker's
+depth-scoped candidate lookup), then `chain.rs`'s `@`-chain parser. See the
+plan file for the full function-by-function sequence.
 
-The repository layer (`src/repository/{destinations,items,edits,indexing}.rs`)
+**Just finished:** `blurt-app` now has a real (if partial) command surface
+over Module 2 — `blurt-schema`'s repository layer is reachable from Tauri.
+Covers a representative slice: full CRUD on destinations (create, rename,
+reparent, tombstone, path-resolution), items (capture, move, check/uncheck,
+tombstone, list-for-destination), and edits (append, history). `AppState`
+holds `Mutex<Option<Database>>`/`Mutex<Option<Keyring>>` — the app starts
+locked; no unlock command exists yet (that's Module 6 UI territory, deferred).
+`tauri-specta` (typed TS bindings) was deliberately skipped — see decision
+#12 below.
+
+The repository layer itself (`src/repository/{destinations,items,edits,indexing}.rs`)
 covers everything `MODULE_02_SCHEMA.md` specifies:
 
 - **Destinations** — create, rename, reparent, tombstone, `path` (walks
@@ -41,9 +59,6 @@ covers everything `MODULE_02_SCHEMA.md` specifies:
   `items`/`destinations` and filters `isSensitive = 0` structurally in the
   query itself. Covered directly:
   `sensitive_destinations_items_are_structurally_excluded`.
-
-`blurt-app` still has no registered commands — that's the next session's
-starting point. Modules 3-6 remain deferred beyond that.
 
 ---
 
@@ -60,13 +75,14 @@ starting point. Modules 3-6 remain deferred beyond that.
 | `blurt-router` (M3) | **Empty stub** | |
 | `blurt-rag` (M4) | **Empty stub** | |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
-| `blurt-app` | **Stub only** | `builder()` returns a bare `tauri::Builder`; no commands registered |
+| `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, no router/search/ask commands yet |
 
-**67 tests green** across the workspace as of the last commit. Test command
-(note the PATH requirement under Environment below):
+**97 tests green** across the workspace as of the last commit (67
+`blurt-schema` + 30 `blurt-app`). Test command (note the PATH requirement
+under Environment below):
 
 ```bash
-cargo test -p blurt-schema
+cargo test --workspace
 ```
 
 Two bits of expected noise in that output, neither a problem:
@@ -149,6 +165,24 @@ one.
     `Result<Option<T>>` via `rusqlite`'s `OptionalExtension`, not a `NotFound`
     error variant — missing-by-id isn't exceptional here.
 
+12. **`blurt-app` skips `tauri-specta` for now.** It has never had a stable
+    release targeting Tauri v2 — only a long-running `2.0.0-rc.x` pre-release
+    exists (confirmed via crates.io, latest `2.0.0-rc.25` as of 2026-05-08) —
+    and there is no frontend yet to consume generated bindings (`src/App.tsx`
+    is still a blank stub). Commands use plain `#[tauri::command]` +
+    `tauri::generate_handler!`; DTOs (`blurt-app/src/dto.rs`) are hand-written
+    `serde` structs mirroring `blurt_schema`'s domain structs, not derives
+    added to `blurt_schema` itself (that crate stays storage-primitives-only).
+    Revisit adopting `tauri-specta` whichever session actually starts Module 6.
+
+13. **Every `blurt-app` command splits into a testable `<name>_impl(state:
+    &AppState, ...)` plus a one-line `#[tauri::command]` wrapper that just
+    unwraps `State` and delegates.** Forced by an environment issue, not a
+    preference — see the `tauri::test` gotcha below. The `_impl` functions
+    are the actual tested logic; the wrapper is untested by an automated test
+    (a one-line delegation, low risk). Follow this pattern for every future
+    command in this crate, not just the current ones.
+
 ---
 
 ## Environment / build gotchas
@@ -199,6 +233,30 @@ one.
 - `src-tauri/target/` and `node_modules/` are gitignored and large; a fresh
   clone needs `npm install` plus the multi-minute first Rust build.
 
+- **`cargo test` at the `src-tauri/` root only runs the `blurt` binary
+  package's tests (0 of them) — it does NOT test the whole workspace.** Use
+  `cargo test --workspace` to actually run `blurt-schema`'s and `blurt-app`'s
+  tests. Easy to miss since both commands succeed silently.
+
+- **`tauri::test`'s mock-app harness (`mock_builder`/`mock_context`/
+  `noop_assets`) crashes the entire test binary at process startup on this
+  dev machine**, `STATUS_ENTRYPOINT_NOT_FOUND` (0xC0000139), before any test
+  code runs — confirmed via a bisected minimal repro (even a bare
+  `mock_builder().build(mock_context(noop_assets()))` with no `.manage()`,
+  no commands, no window crashes identically). Ruled out: stale incremental
+  build artifacts (full `cargo clean` + rebuild, same crash) and Strawberry
+  Perl's MinGW toolchain (`c/bin`) polluting `wry`/`tao`/`webview2-com-sys`'s
+  build scripts (rebuilt with Perl-only, no MinGW, on `PATH`, same crash).
+  Root cause not identified — a real WebView2 Runtime is installed
+  (151.0.4129.101) and `dumpbin /dependents` shows nothing unusual, so this
+  looks like a genuine Tauri-2.11.5/Windows environment incompatibility, not
+  a fixable code or PATH issue. **Workaround: don't use `tauri::test` at all.**
+  Every `blurt-app` command is tested via its plain `_impl(&AppState, ...)`
+  function instead (decision #13 above) — zero `tauri::test` dependency,
+  fully reliable. The actual packaged app (`npm run tauri dev` /
+  `target/debug/blurt.exe`) launches fine; this is specific to the `cargo
+  test` mock-runtime path.
+
 ---
 
 ## Session log
@@ -219,7 +277,24 @@ Newest first. One short entry per session — what changed, not how.
   `npm run tauri dev` still opens a window. Module 2 is complete except for the
   repository/CRUD layer.
 
-### 2026-08-24
+### 2026-08-24 (session 2)
+- Planned the roadmap through Module 3 and Module 4 (LLM-free + Sleep-Mode):
+  saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md`. Locked
+  decisions during planning: Sleep-Mode's generative model is
+  Qwen2.5-3B-Instruct (GGUF, Q4_K_M, Apache 2.0) via a Rust llama.cpp binding
+  (`llama-cpp-2`), not an Ollama sidecar; embedding model is
+  bge-small-en-v1.5 via `fastembed`.
+- Executed Phase 1: wired `blurt-app` commands over `blurt-schema`'s
+  repository layer — `AppState`, `CommandError`, DTOs, and a representative
+  destinations/items/edits command slice, TDD throughout. Skipped
+  `tauri-specta` (decision #12) after checking crates.io mid-session. Hit
+  and worked around the `tauri::test` mock-harness crash (decision #13,
+  environment gotcha above) by splitting every command into a testable
+  `_impl` plus a thin wrapper. **97 tests green** (67 + 30 new), workspace
+  `cargo build` clean, `npm run tauri dev` launches successfully with all 12
+  commands registered.
+
+### 2026-08-24 (session 1)
 - Built the `blurt-schema` repository/CRUD layer, TDD throughout (Red
   confirmed via `todo!()` stubs before each implementation): `destinations`,
   `items`, `edits`, then `indexing::items_for_indexing` (the sensitive-safe
