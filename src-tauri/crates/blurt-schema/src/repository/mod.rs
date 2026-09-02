@@ -9,7 +9,7 @@ pub mod edits;
 pub mod indexing;
 pub mod items;
 
-pub use destinations::{Destination, DestinationKind};
+pub use destinations::{Destination, DestinationKind, RANDOM_THOUGHTS_ID, UNSORTED_ID};
 pub use edits::Edit;
 pub use indexing::items_for_indexing;
 pub use items::Item;

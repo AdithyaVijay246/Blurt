@@ -244,6 +244,12 @@ version = "0.1.0"
 [[package]]
 name = "blurt-router"
 version = "0.1.0"
+dependencies = [
+ "blurt-schema",
+ "rusqlite",
+ "thiserror 2.0.20",
+ "uuid",
+]
 
 [[package]]
 name = "blurt-schema"

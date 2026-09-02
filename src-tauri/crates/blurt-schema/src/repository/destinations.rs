@@ -174,6 +174,57 @@ pub fn path(conn: &Connection, id: Uuid) -> Result<Vec<Destination>> {
     Ok(chain)
 }
 
+/// Well-known id of the reserved **Unsorted** destination seeded by migration
+/// `0001`. Fixed rather than generated so paired devices converge on one
+/// Unsorted instead of two — see `MODULE_02_SCHEMA.md` §1 and the seed-row
+/// comment in `0001_initial.sql`.
+pub const UNSORTED_ID: Uuid = uuid::uuid!("00000000-b1c7-4000-8000-000000000001");
+
+/// Well-known id of the premade **Random Thoughts** destination. Ordinary, not
+/// `isSystem` — the user may rename, retrigger or delete it — but Module 3
+/// needs to recognize it by id in order to keep it out of natural-language
+/// matching (`MODULE_03_ROUTER.md` §3), which a name match could not survive.
+pub const RANDOM_THOUGHTS_ID: Uuid = uuid::uuid!("00000000-b1c7-4000-8000-000000000002");
+
+/// Lists the live children of `parent_id`, or the live top-level destinations
+/// when `parent_id` is `None`.
+///
+/// One function rather than a separate `list_top_level`, because Module 3's
+/// `@` picker walks depth with exactly this `Option<Uuid>` shape: the first
+/// chain segment searches `None`, and each resolved segment re-scopes the next
+/// lookup to its own id (`MODULE_03_ROUTER.md` §2.6).
+///
+/// Tombstoned rows are excluded. Ordering is `sortOrder` then `name` so the
+/// picker's dropdown is stable between keystrokes.
+pub fn list_children(conn: &Connection, parent_id: Option<Uuid>) -> Result<Vec<Destination>> {
+    // `parentId IS ?1` rather than `=`: SQLite's `IS` is null-safe equality, so
+    // one statement covers both the top-level (`NULL`) and nested cases.
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM destinations
+         WHERE deletedAt IS NULL AND parentId IS ?1
+         ORDER BY sortOrder, name"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([parent_id.map(|p| p.to_string())], row_to_destination)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Lists every live destination at any depth.
+///
+/// Depth-scoped lookup is [`list_children`]; this is the flat variant Module
+/// 3's natural-language fallback needs, since freeform text carries no
+/// hierarchy context to scope by (`MODULE_03_ROUTER.md` §3).
+pub fn list_all(conn: &Connection) -> Result<Vec<Destination>> {
+    let sql = format!(
+        "SELECT {SELECT_COLUMNS} FROM destinations
+         WHERE deletedAt IS NULL
+         ORDER BY sortOrder, name"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_destination)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +344,79 @@ mod tests {
         let chain = path(db.conn(), top.id).unwrap();
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].id, top.id);
+    }
+
+    #[test]
+    fn seed_ids_match_the_rows_migration_0001_inserts() {
+        let db = migrated();
+
+        let unsorted = get_by_id(db.conn(), UNSORTED_ID).unwrap().expect("seeded by 0001");
+        assert_eq!(unsorted.name, "Unsorted");
+        assert!(unsorted.is_system, "Unsorted is the reserved system destination");
+
+        let random = get_by_id(db.conn(), RANDOM_THOUGHTS_ID).unwrap().expect("seeded by 0001");
+        assert_eq!(random.name, "Random Thoughts");
+        assert!(!random.is_system, "Random Thoughts is an ordinary user destination");
+    }
+
+    #[test]
+    fn list_children_returns_only_the_live_children_of_one_parent() {
+        let db = migrated();
+        let parent = create(db.conn(), "Shopping", "shop", DestinationKind::List, None, false, false, 0).unwrap();
+        let kept = create(db.conn(), "Weekly", "weekly", DestinationKind::List, Some(parent.id), false, false, 0).unwrap();
+        let gone = create(db.conn(), "Monthly", "monthly", DestinationKind::List, Some(parent.id), false, false, 0).unwrap();
+        // A grandchild must not surface — this is depth-scoped, not recursive.
+        create(db.conn(), "Produce", "produce", DestinationKind::List, Some(kept.id), false, false, 0).unwrap();
+        // A sibling under a different parent must not surface either.
+        let other = create(db.conn(), "Errands", "errands", DestinationKind::List, None, false, false, 0).unwrap();
+        create(db.conn(), "Post Office", "post", DestinationKind::List, Some(other.id), false, false, 0).unwrap();
+
+        tombstone(db.conn(), gone.id).unwrap();
+
+        let children = list_children(db.conn(), Some(parent.id)).unwrap();
+        let names: Vec<&str> = children.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Weekly"]);
+    }
+
+    #[test]
+    fn list_children_with_none_returns_top_level_destinations_including_the_seeds() {
+        let db = migrated();
+        let top = create(db.conn(), "Shopping", "shop", DestinationKind::List, None, false, false, 5).unwrap();
+        create(db.conn(), "Weekly", "weekly", DestinationKind::List, Some(top.id), false, false, 0).unwrap();
+
+        let top_level = list_children(db.conn(), None).unwrap();
+        let names: Vec<&str> = top_level.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Unsorted", "Random Thoughts", "Shopping"]);
+    }
+
+    #[test]
+    fn list_children_orders_by_sort_order_then_name() {
+        let db = migrated();
+        let parent = create(db.conn(), "Shopping", "shop", DestinationKind::List, None, false, false, 0).unwrap();
+        create(db.conn(), "Alpha", "alpha", DestinationKind::List, Some(parent.id), false, false, 2).unwrap();
+        create(db.conn(), "Zed", "zed", DestinationKind::List, Some(parent.id), false, false, 1).unwrap();
+        create(db.conn(), "Beta", "beta", DestinationKind::List, Some(parent.id), false, false, 1).unwrap();
+
+        let children = list_children(db.conn(), Some(parent.id)).unwrap();
+        let names: Vec<&str> = children.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["Beta", "Zed", "Alpha"]);
+    }
+
+    #[test]
+    fn list_all_returns_every_live_destination_at_any_depth() {
+        let db = migrated();
+        let top = create(db.conn(), "Shopping", "shop", DestinationKind::List, None, false, false, 5).unwrap();
+        let mid = create(db.conn(), "Weekly", "weekly", DestinationKind::List, Some(top.id), false, false, 6).unwrap();
+        create(db.conn(), "Produce", "produce", DestinationKind::List, Some(mid.id), false, false, 7).unwrap();
+        let gone = create(db.conn(), "Old", "old", DestinationKind::List, Some(mid.id), false, false, 8).unwrap();
+        tombstone(db.conn(), gone.id).unwrap();
+
+        let all = list_all(db.conn()).unwrap();
+        let names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Unsorted", "Random Thoughts", "Shopping", "Weekly", "Produce"],
+            "flat listing spans every depth and excludes tombstones"
+        );
     }
 }

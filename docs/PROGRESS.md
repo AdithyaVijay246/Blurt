@@ -18,11 +18,11 @@ tracks that.
 
 Remote: `https://github.com/AdithyaVijay246/Blurt`
 
-Last updated: 2026-08-24
+Last updated: 2026-09-02
 
 A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
-is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phase 1
-below is done; Phases 2-6 (router, indexing, retrieval, Sleep-Mode, final
+is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1
+and 2 below are done; Phases 3-6 (indexing, retrieval, Sleep-Mode, final
 wiring) are still ahead. Read that plan file at the start of the next session
 rather than re-deriving the sequencing here.
 
@@ -30,37 +30,41 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** Phase 2 of the roadmap — Module 3 router (`blurt-router`),
-starting with a `list_children`/`list_top_level` addition to
-`blurt_schema::repository::destinations` (needed for the `@`-picker's
-depth-scoped candidate lookup), then `chain.rs`'s `@`-chain parser. See the
-plan file for the full function-by-function sequence.
+**Next action:** Phase 3 of the roadmap — Module 4's LLM-free indexing
+pipeline in `blurt-rag`. Start with the `0002_embeddings_edit_id.sql`
+migration in `blurt-schema` (roadmap decision #1: `embeddings` needs a
+nullable `editId`), then `is_item_indexable` beside the existing
+`items_for_indexing`, then `chunking.rs` — which is pure logic and should be
+done thoroughly first, before any model dependency enters the crate. Verify
+`fastembed`, `lancedb` and the YAKE crate against docs.rs *before* writing
+code against them; the roadmap flags `lancedb` as the highest external-API
+risk in that phase.
 
-**Just finished:** `blurt-app` now has a real (if partial) command surface
-over Module 2 — `blurt-schema`'s repository layer is reachable from Tauri.
-Covers a representative slice: full CRUD on destinations (create, rename,
-reparent, tombstone, path-resolution), items (capture, move, check/uncheck,
-tombstone, list-for-destination), and edits (append, history). `AppState`
-holds `Mutex<Option<Database>>`/`Mutex<Option<Keyring>>` — the app starts
-locked; no unlock command exists yet (that's Module 6 UI territory, deferred).
-`tauri-specta` (typed TS bindings) was deliberately skipped — see decision
-#12 below.
+**Just finished:** Module 3 is complete. `blurt-router` implements the whole
+of `MODULE_03_ROUTER.md`, and `blurt-schema` grew the three small additions it
+needed:
 
-The repository layer itself (`src/repository/{destinations,items,edits,indexing}.rs`)
-covers everything `MODULE_02_SCHEMA.md` specifies:
+- **`chain.rs`** — `parse` splits capture text into body + trailing `@` chain.
+  Trailing-only, `@`+space inert, multi-segment via `@a@b`.
+- **`candidates.rs`** — `candidates_at_depth` (the live filtered dropdown) and
+  `exact_match` (resolving one typed segment), both scoped by `Option<Uuid>`
+  depth, both hiding the `isSystem` Unsorted row.
+- **`nl.rs`** — `best_match`, the confidence-scored freeform fallback, with
+  Random Thoughts and system rows structurally excluded.
+- **`voice.rs`** — `normalize_spoken_at`, the §4 pre-pass that turns a
+  transcript into `@` syntax and reports every rewrite, so §4.2's per-instance
+  dismissal is possible.
+- **`resolve.rs`** — `route`, returning `Routing { text, decision }` over
+  `Resolved | Create | NlMatched | Unrouted`, plus `slugify_trigger`.
+- **`blurt-schema`** — `destinations::list_children(conn, Option<Uuid>)`,
+  `destinations::list_all(conn)`, and the `UNSORTED_ID` /
+  `RANDOM_THOUGHTS_ID` seed constants.
 
-- **Destinations** — create, rename, reparent, tombstone, `path` (walks
-  `parentId` on read per §1 — never stored).
-- **Items** — capture, `move_to` (reparenting/resolving-Unsorted/dragging are
-  all this one write), `set_checked`, tombstone, `list_for_destination`.
-- **Edits** — `append` (one transaction: inserts the `edits` row and updates
-  `items.currentText`; `originalText` is never touched), `history_for_item`.
-- **Sensitive-safe accessor** — `indexing::items_for_indexing` joins
-  `items`/`destinations` and filters `isSensitive = 0` structurally in the
-  query itself. Covered directly:
-  `sensitive_destinations_items_are_structurally_excluded`.
-
----
+**Not yet wired:** `blurt-app` has no router commands. That is Phase 6
+(`capture_item_via_router`, `capture_item_via_voice`, `classify_input`),
+deliberately left until after Module 4 so the search/ask commands land in the
+same pass. `blurt-router` is complete and tested but not yet reachable from
+the frontend.
 
 ## Status by component
 
@@ -71,15 +75,15 @@ covers everything `MODULE_02_SCHEMA.md` specifies:
 | `blurt-schema` — keyring | **Done, green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
 | `blurt-schema` — DDL | **Done, green** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
-| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,indexing}.rs` |
-| `blurt-router` (M3) | **Empty stub** | |
+| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,indexing}.rs`, plus `list_children`/`list_all` and the seed-id constants Module 3 needed |
+| `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
 | `blurt-rag` (M4) | **Empty stub** | |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
-| `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, no router/search/ask commands yet |
+| `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
 
-**97 tests green** across the workspace as of the last commit (67
-`blurt-schema` + 30 `blurt-app`). Test command (note the PATH requirement
-under Environment below):
+**167 tests green** across the workspace as of the last commit (72
+`blurt-schema` + 65 `blurt-router` + 30 `blurt-app`). Test command (note the
+PATH requirement under Environment below):
 
 ```bash
 cargo test --workspace
@@ -175,6 +179,65 @@ one.
     added to `blurt_schema` itself (that crate stays storage-primitives-only).
     Revisit adopting `tauri-specta` whichever session actually starts Module 6.
 
+14. **A chain-opening `@` must sit on a word boundary.** §2 describes the live
+    picker, not a parser, and says nothing about what precedes the `@`. Without
+    a boundary rule, `email bob@example.com` parses `example.com` as a
+    destination segment. So the `@` that *opens* a chain must be preceded by
+    whitespace or start the input; `@`s *inside* an already-open chain need no
+    boundary, which is what keeps §2.6's `@shopping@grocery` working.
+
+15. **Trailing whitespace does not dismiss a chain.** §2.5's "typing past it,
+    e.g. into a space" means typing *content* past the picker — which moves the
+    chain off the end of the input and is handled by the trailing-only rule
+    already. A bare trailing space has typed past nothing, and losing the
+    user's explicit routing to an invisible character buys nothing. `parse`
+    trims trailing whitespace before looking for a chain.
+
+16. **Voice normalization consumes the whitespace after "at", and closes the
+    gap between consecutive segments.** Both are forced by the typed grammar
+    rather than stated in §4. Rewriting "at weekly" to `@ weekly` would produce
+    exactly the construction §2.2 calls inert, so voice routing could never
+    fire; and rewriting "at shopping at grocery" to `@shopping @grocery` would
+    make two unrelated chains of which only the last survives, rather than the
+    single two-segment chain §4.4 describes. `normalize_spoken_at` therefore
+    returns `SpokenAt { offset, original }` per rewrite — `original` holds the
+    replaced text verbatim so §4.2's per-instance dismissal restores
+    capitalisation and spacing exactly.
+
+17. **NL confidence formula** (no formula is specified in
+    `MODULE_03_ROUTER.md`, and it is not in that doc's own "Explicitly
+    Deferred" list, so it is an implementation detail rather than a
+    stop-and-ask item):
+    `score = 1.0×(trigger appears as a whole word) + 0.6×(name appears as a
+    whole word) + 0.4×(fraction of the name's words present)`, confident above
+    `0.6`. The non-obvious consequence, documented in `nl.rs` too: the fraction
+    term alone tops out at `0.4`, so a confident match *always* requires a
+    whole-word trigger or name hit, and the fraction only separates candidates
+    that both already hit. Erring conservative is right — an unconfident blurt
+    lands in Unsorted with a badge, a wrong confident guess hides it.
+
+18. **NL candidate exclusions are `isSystem` and Random Thoughts only.**
+    §3 names exactly those two. Sensitive destinations stay eligible: NL
+    matching is local string comparison with no model involved, so the
+    "secrets never touch a model" constraint is not in play, and excluding
+    them would silently mis-route. Random Thoughts is recognised by
+    `RANDOM_THOUGHTS_ID`, not by name, since the user may rename it.
+
+19. **`route` returns `Routing { text, decision }`, not a bare
+    `RoutingDecision`.** Every decision variant needs the text it was made
+    about; hanging it off the enum would repeat the same `text: String` field
+    four times. The variant set is unchanged. `Create` describes only the
+    *first* unresolved segment, per §4.3's "fixing it re-validates everything
+    downstream", but carries the rest in `remaining_segments` so nothing is
+    silently dropped.
+
+20. **`list_children(conn, Option<Uuid>)` is one function, not a
+    `list_children`/`list_top_level` pair.** `None` is the top level. Module
+    3's picker walks depth with exactly that `Option<Uuid>` shape, so one
+    function fits both callers; SQLite's null-safe `IS` operator makes it one
+    statement too. `list_all` is the separate flat variant the NL fallback
+    needs, since freeform text carries no depth to scope by.
+
 13. **Every `blurt-app` command splits into a testable `<name>_impl(state:
     &AppState, ...)` plus a one-line `#[tauri::command]` wrapper that just
     unwraps `State` and delegates.** Forced by an environment issue, not a
@@ -262,6 +325,21 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-02
+- Executed Phase 2 of the roadmap: **Module 3 is complete**. Built
+  `blurt-router` end to end, TDD throughout (`todo!()` stub + tests written and
+  confirmed Red before each implementation): `chain`, `candidates`, `nl`,
+  `voice`, `resolve`. Added the three things `blurt-schema` was missing for it
+  — `destinations::list_children`, `destinations::list_all`, and the
+  `UNSORTED_ID`/`RANDOM_THOUGHTS_ID` seed constants.
+- Settled six details §2–§4 leave to the implementation (decisions #14-#20
+  above), the load-bearing ones being the word-boundary rule for a
+  chain-opening `@` and the two voice-normalization rules without which §4.4's
+  multi-segment spoken chains could not work at all.
+- **167 tests green** (72 + 65 new + 30), workspace `cargo build` clean,
+  `cargo clippy -p blurt-router` clean. `blurt-router` is finished but not yet
+  reachable over IPC — that wiring is Phase 6, after Module 4.
 
 ### 2026-08-20
 - Scaffolded the repo per `MODULE_01_ARCHITECTURE.md` §2: workspace, five
