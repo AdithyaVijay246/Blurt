@@ -50,6 +50,22 @@ pub fn append(conn: &Connection, item_id: Uuid, text: &str) -> Result<Edit> {
     Ok(Edit { id, item_id, text: text.to_string(), edited_at })
 }
 
+/// Fetches one edit by id.
+///
+/// Module 4 embeds each text version separately, so its indexing pass needs to
+/// read the exact text of the specific edit it was handed rather than the
+/// item's current text — which by then may already be a later version.
+pub fn get_by_id(conn: &Connection, id: Uuid) -> Result<Option<Edit>> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT id, itemId, text, editedAt FROM edits WHERE id = ?1",
+        [id.to_string()],
+        row_to_edit,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Full edit history for an item, oldest first.
 pub fn history_for_item(conn: &Connection, item_id: Uuid) -> Result<Vec<Edit>> {
     let mut stmt = conn.prepare(
@@ -121,5 +137,27 @@ mod tests {
         let db = migrated();
         let item = an_item(&db);
         assert!(history_for_item(db.conn(), item.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fetches_one_edit_by_id() {
+        let db = migrated();
+        let item = an_item(&db);
+        let first = append(db.conn(), item.id, "buy oat milk").unwrap();
+        let second = append(db.conn(), item.id, "buy oat milk and bread").unwrap();
+
+        let found = get_by_id(db.conn(), first.id).unwrap().expect("stored");
+        assert_eq!(found, first);
+        assert_eq!(
+            found.text, "buy oat milk",
+            "an edit must read back its own text, not the item's latest"
+        );
+        assert_ne!(found.text, second.text);
+    }
+
+    #[test]
+    fn an_unknown_edit_id_resolves_to_nothing() {
+        let db = migrated();
+        assert!(get_by_id(db.conn(), Uuid::new_v4()).unwrap().is_none());
     }
 }

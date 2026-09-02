@@ -13,7 +13,10 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Ordered, forward-only migrations. Index + 1 is the resulting `user_version`.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_embeddings_edit_id.sql"),
+];
 
 /// The `user_version` a fully-migrated database reports.
 pub const LATEST_VERSION: i64 = MIGRATIONS.len() as i64;
@@ -296,5 +299,115 @@ mod tests {
                 "missing index {expected}; found {names:?}"
             );
         }
+    }
+
+    /// Module 4 §3 embeds every *version* of an item's text. Once an item has
+    /// more than one version, `itemId` alone no longer identifies which text a
+    /// chunk came from — hence `editId`, NULL meaning the original capture.
+    #[test]
+    fn embeddings_carry_a_nullable_edit_id() {
+        let db = migrated();
+        let mut stmt = db.conn().prepare("PRAGMA table_info(embeddings)").unwrap();
+        let columns: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        let (_, not_null) = columns
+            .iter()
+            .find(|(name, _)| name == "editId")
+            .expect("embeddings.editId should exist");
+        assert_eq!(*not_null, 0, "editId must be nullable — the original capture has no edit row");
+    }
+
+    #[test]
+    fn an_embedding_can_attribute_itself_to_an_edit_or_to_the_original() {
+        let db = migrated();
+        let (item_id, edit_id) = seed_item_with_one_edit(&db);
+
+        for edit in [None, Some(edit_id.as_str())] {
+            db.conn()
+                .execute(
+                    "INSERT INTO embeddings (id, itemId, editId, vectorRef, chunkIndex, chunkStartOffset, chunkEndOffset)
+                     VALUES (?1, ?2, ?3, 'vec', 0, 0, 10)",
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), &item_id, edit],
+                )
+                .expect("both the original capture and an edit should be embeddable");
+        }
+    }
+
+    #[test]
+    fn an_embedding_cannot_reference_an_edit_that_does_not_exist() {
+        let db = migrated();
+        let (item_id, _) = seed_item_with_one_edit(&db);
+
+        let orphan = db.conn().execute(
+            "INSERT INTO embeddings (id, itemId, editId, vectorRef, chunkIndex, chunkStartOffset, chunkEndOffset)
+             VALUES (?1, ?2, ?3, 'vec', 0, 0, 10)",
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                &item_id,
+                uuid::Uuid::new_v4().to_string()
+            ],
+        );
+        assert!(orphan.is_err(), "editId should be a real foreign key, not a loose string");
+    }
+
+    /// The incremental path had never been exercised while `0001` was the only
+    /// migration: every test database was built from scratch at the latest
+    /// version. This one starts at version 1 with real rows in it, the way an
+    /// installed copy of the app does.
+    #[test]
+    fn upgrades_an_existing_version_one_database_without_losing_data() {
+        let db = Database::open_in_memory(&MasterKey::generate()).unwrap();
+
+        let tx = db.conn().unchecked_transaction().unwrap();
+        tx.execute_batch(MIGRATIONS[0]).unwrap();
+        tx.pragma_update(None, "user_version", 1).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(current_version(db.conn()).unwrap(), 1);
+
+        let (item_id, _) = seed_item_with_one_edit(&db);
+
+        run(db.conn()).expect("an existing database should upgrade in place");
+
+        assert_eq!(current_version(db.conn()).unwrap(), LATEST_VERSION);
+        let surviving: String = db
+            .conn()
+            .query_row("SELECT currentText FROM items WHERE id = ?1", [&item_id], |r| r.get(0))
+            .expect("the pre-existing item should survive the upgrade");
+        assert_eq!(surviving, "buy milk");
+    }
+
+    /// A destination, an item in it, and one edit of that item. Returns the
+    /// item and edit ids.
+    fn seed_item_with_one_edit(db: &Database) -> (String, String) {
+        let destination_id = uuid::Uuid::new_v4().to_string();
+        let item_id = uuid::Uuid::new_v4().to_string();
+        let edit_id = uuid::Uuid::new_v4().to_string();
+
+        db.conn()
+            .execute(
+                "INSERT INTO destinations (id, name, trigger, type, isSystem, isSensitive, sortOrder, createdAt)
+                 VALUES (?1, 'Shopping', 'shop', 'list', 0, 0, 0, 0)",
+                [&destination_id],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO items (id, destinationId, originalText, currentText, createdAt)
+                 VALUES (?1, ?2, 'buy milk', 'buy milk', 0)",
+                [&item_id, &destination_id],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO edits (id, itemId, text, editedAt) VALUES (?1, ?2, 'buy oat milk', 1)",
+                [&edit_id, &item_id],
+            )
+            .unwrap();
+
+        (item_id, edit_id)
     }
 }

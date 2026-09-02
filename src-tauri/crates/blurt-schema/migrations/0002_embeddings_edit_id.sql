@@ -1,0 +1,16 @@
+-- Migration 0002 — per-version embedding attribution.
+--
+-- MODULE_04_EMBEDDINGS_RAG.md §3 embeds every *version* of an item's text —
+-- the original capture and each edit — so searching either the old or the new
+-- wording finds the item (MODULE_03_ROUTER.md §6's "mind map" philosophy).
+--
+-- Once an item has more than one text version, `embeddings.itemId` alone no
+-- longer says which version a chunk came from, which matters both for
+-- replacing an old version's chunks on re-index and for §7's jump-to-chunk
+-- navigation: the stored character offsets are only meaningful against the
+-- exact text they were computed from.
+--
+-- NULL means the original capture. That is not a missing value: `originalText`
+-- is written once and never updated (MODULE_02_SCHEMA.md §2), so it has no
+-- `edits` row to point at and never will.
+ALTER TABLE embeddings ADD COLUMN editId TEXT REFERENCES edits(id);

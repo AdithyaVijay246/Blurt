@@ -21,50 +21,55 @@ Remote: `https://github.com/AdithyaVijay246/Blurt`
 Last updated: 2026-09-02
 
 A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
-is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1
-and 2 below are done; Phases 3-6 (indexing, retrieval, Sleep-Mode, final
-wiring) are still ahead. Read that plan file at the start of the next session
+is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1-3
+below are done; Phases 4-6 (retrieval, Sleep-Mode, final wiring) are still
+ahead. Read that plan file at the start of the next session
 rather than re-deriving the sequencing here.
 
 ---
 
 ## Resume here
 
-**Next action:** Phase 3 of the roadmap — Module 4's LLM-free indexing
-pipeline in `blurt-rag`. Start with the `0002_embeddings_edit_id.sql`
-migration in `blurt-schema` (roadmap decision #1: `embeddings` needs a
-nullable `editId`), then `is_item_indexable` beside the existing
-`items_for_indexing`, then `chunking.rs` — which is pure logic and should be
-done thoroughly first, before any model dependency enters the crate. Verify
-`fastembed`, `lancedb` and the YAKE crate against docs.rs *before* writing
-code against them; the roadmap flags `lancedb` as the highest external-API
-risk in that phase.
+**Next action:** Phase 4 of the roadmap — Module 4's hybrid retrieval, in a new
+`blurt-rag/src/search.rs`. `hybrid_search` combines the vector side
+(`vectorstore::search`) with the keyword side
+(`blurt_schema::repository::keywords::items_matching_any`, which already
+excludes sensitive and tombstoned items structurally), dedupes by `itemId`,
+and sorts by pure relevance with **no recency re-weighting** — §4 is explicit
+that time-scoping at the window level already handles recency. Then `@`-scoping
+as a post-query re-sort into in-scope/elsewhere groups (§6: soft
+prioritization, never a `WHERE` filter), the `RetrievalWindow` filter on
+`editedAt`, and path/timestamp attachment per §7.
 
-**Just finished:** Module 3 is complete. `blurt-router` implements the whole
-of `MODULE_03_ROUTER.md`, and `blurt-schema` grew the three small additions it
-needed:
+Everything Phase 4 needs is in place: `embeddings::get_by_vector_ref` turns a
+LanceDB hit into a displayable row, and `destinations::path` computes the
+display path.
 
-- **`chain.rs`** — `parse` splits capture text into body + trailing `@` chain.
-  Trailing-only, `@`+space inert, multi-segment via `@a@b`.
-- **`candidates.rs`** — `candidates_at_depth` (the live filtered dropdown) and
-  `exact_match` (resolving one typed segment), both scoped by `Option<Uuid>`
-  depth, both hiding the `isSystem` Unsorted row.
-- **`nl.rs`** — `best_match`, the confidence-scored freeform fallback, with
-  Random Thoughts and system rows structurally excluded.
-- **`voice.rs`** — `normalize_spoken_at`, the §4 pre-pass that turns a
-  transcript into `@` syntax and reports every rewrite, so §4.2's per-instance
-  dismissal is possible.
-- **`resolve.rs`** — `route`, returning `Routing { text, decision }` over
-  `Resolved | Create | NlMatched | Unrouted`, plus `slugify_trigger`.
-- **`blurt-schema`** — `destinations::list_children(conn, Option<Uuid>)`,
-  `destinations::list_all(conn)`, and the `UNSORTED_ID` /
-  `RANDOM_THOUGHTS_ID` seed constants.
+**Just finished:** Phase 3 — Module 4's LLM-free indexing pipeline. `blurt-rag`
+now runs a capture or edit end to end into chunks, vectors and tags:
 
-**Not yet wired:** `blurt-app` has no router commands. That is Phase 6
-(`capture_item_via_router`, `capture_item_via_voice`, `classify_input`),
-deliberately left until after Module 4 so the search/ask commands land in the
-same pass. `blurt-router` is complete and tested but not yet reachable from
-the frontend.
+- **`chunking.rs`** — 180-word chunks with 30 words of overlap (~17%, inside
+  §3's 15-20% band), each carrying the character range §7's jump-to-chunk
+  needs. Word budget is deliberately *below* §3's 256-token limit; see decision
+  #21.
+- **`embedding.rs`** — `fastembed`/bge-small-en-v1.5, 384 dims, model loaded
+  lazily on first real use.
+- **`keywords.rs`** — YAKE via `yake-rust`, made deterministic across processes
+  (decision #23 — this was a real bug).
+- **`vectorstore.rs`** — LanceDB wrapper: open/create, add, nearest-neighbour
+  search, delete-by-item.
+- **`indexing.rs`** — `index_item` / `remove_item`, LanceDB first then one
+  SQLCipher transaction.
+- **`blurt-schema`** — migration `0002` (nullable `embeddings.editId`),
+  `is_item_indexable`, `store_index_results`, `edits::get_by_id`, and two new
+  repositories: `repository/embeddings.rs` and `repository/keywords.rs`.
+
+**Known gap, deliberately left for Phase 6:** marking an *existing* destination
+sensitive stops future indexing but does not retract what was already indexed.
+§3 says sensitive content is invisible to the pipeline, so that transition has
+to call `blurt_rag::indexing::remove_item` for its items. It is orchestration
+and belongs with the command that flips the flag, which does not exist yet.
+Noted in `indexing.rs`'s module docs too.
 
 ## Status by component
 
@@ -75,19 +80,25 @@ the frontend.
 | `blurt-schema` — keyring | **Done, green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
 | `blurt-schema` — DDL | **Done, green** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
-| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,indexing}.rs`, plus `list_children`/`list_all` and the seed-id constants Module 3 needed |
+| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4 |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
-| `blurt-rag` (M4) | **Empty stub** | |
+| `blurt-rag` (M4) | **Partial, green** | Indexing pipeline done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`. Retrieval (`search.rs`) and Sleep-Mode are Phases 4-5 |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
 
-**167 tests green** across the workspace as of the last commit (72
-`blurt-schema` + 65 `blurt-router` + 30 `blurt-app`). Test command (note the
-PATH requirement under Environment below):
+**247 tests green** across the workspace as of the last commit (104
+`blurt-schema` + 65 `blurt-router` + 48 `blurt-rag` + 30 `blurt-app`), plus 6
+`#[ignore]`d. Test command (note the PATH requirements under Environment
+below):
 
 ```bash
 cargo test --workspace
+cargo test -p blurt-rag -- --ignored   # loads the real ~100MB embedding model
 ```
+
+Use `--no-fail-fast` when you want the whole workspace's results: without it
+cargo stops at the first failing crate, which is easy to misread as "the rest
+passed" when they simply never ran.
 
 Two bits of expected noise in that output, neither a problem:
 `ERROR CORE sqlcipher_page_cipher: hmac check failed for pgno=1` is SQLCipher
@@ -248,6 +259,84 @@ one.
 
 ---
 
+21. **Chunks are sized in words, deliberately below §3's 256-token limit.**
+    Real tokenization belongs to the embedding model, so chunk size is
+    approximated by word count — but English runs ~1.3-1.4 BPE tokens per word,
+    so a literal 256 *words* would be ~340 tokens and the model would silently
+    truncate the tail of every chunk with nothing downstream reporting it.
+    `CHUNK_WORDS = 180`, `OVERLAP_WORDS = 30` (~17%, inside §3's 15-20% band).
+
+22. **Chunk offsets are Unicode scalar counts, not bytes.** This matches the
+    schema's "character range" wording. One trap for Module 6: JavaScript string
+    indices are UTF-16 code units, which agree with scalar counts across the
+    BMP but *not* for astral characters — most emoji. That conversion belongs at
+    the IPC boundary; a silent off-by-one there would look exactly like a
+    chunking bug.
+
+23. **Keyword extraction had to be made deterministic across processes.**
+    `yake-rust` breaks tied scores by hash iteration order, and Rust reseeds
+    that per process — a single note routinely produces several phrases scoring
+    bit-identically. Left alone, the same note showed *different tags on
+    different app launches*, and at the ten-item cut which tied phrase survived
+    was arbitrary. Fixed by asking YAKE for `word_count * NGRAM_SIZE`
+    candidates — a strict upper bound on what it can generate, so it never
+    truncates — then applying our own total order on `(score, text)` and cutting
+    to ten. A fixed over-fetch is *not* sufficient: it holds for short captures
+    and fails silently on long notes, which is where tags matter most.
+    `yake_never_truncates_at_the_candidate_ceiling` guards the premise.
+
+24. **Tags replace; chunk rows accumulate.** §3 embeds every text version so the
+    old wording stays searchable, but a tag list is a claim about what an item
+    *is now* — showing tags drawn from text the user has since rewritten would
+    be wrong on screen, not merely redundant. Hence
+    `keywords::replace_for_item` versus `embeddings::insert_many`.
+
+25. **Embeddings and keywords are hard-deleted, not tombstoned.** The
+    append-only rule in `BLUEPRINT.md` §4 protects what the user *wrote* —
+    `items` and `edits` — and an index entry is derived data that can be
+    rebuilt. Tombstoning it would mean either filtering on every search or
+    surfacing deleted text as a result.
+
+26. **LanceDB is written before SQLCipher, and SQLCipher is authoritative.**
+    Interrupted between the two, the result is orphaned vectors that nothing
+    joins to: unreachable and harmless. The reverse order would leave
+    `embeddings` rows pointing at vectors that do not exist, which a search
+    would surface as results that cannot be opened. `store_index_results`
+    exists as one function because `embeddings::insert_many` and
+    `keywords::replace_for_item` each open their own transaction and SQLite
+    will not nest them.
+
+27. **`index_item` is not idempotent, on purpose.** Calling it twice for the
+    same version stores a second set of chunks. Search dedupes by item so the
+    user-visible effect is nil; the scheduler in `blurt-app` (Phase 6) owns not
+    double-firing. Making it idempotent would need delete-by-(item, version) on
+    both stores, which nothing needs yet.
+
+28. **`lancedb` is pinned below 0.38.** 0.38.0 does not compile without its
+    `remote` feature: `src/job.rs` uses `Error::Http`, which `src/error.rs`
+    gates behind that feature, while `pub mod job;` is left ungated — an
+    upstream regression, since 0.37.1 does not reference it at all. Enabling
+    `remote` would compile a LanceDB Cloud REST client into a local-first app to
+    work around a missing `cfg`, so the pin is the honest fix. Recheck on the
+    next release. Note 0.37.1 needs `lance =10.0.0`, so moving between these
+    versions is a full rebuild of the lance/datafusion stack, not a quick swap.
+
+29. **`fastembed` downloads its model from Hugging Face on first load.**
+    `BLUEPRINT.md` §2's bundling requirement is written about the *generative*
+    model, so the embedding model is technically uncovered — but "zero AI setup
+    friction and offline capability from first launch" reads no differently for
+    a model that runs on every capture. `Embedder::new` therefore takes a cache
+    directory rather than defaulting it, so pointing it at a bundled Tauri
+    resource makes the load offline with no code change. Phase 5 has to solve
+    the same problem for the GGUF; solve both together.
+
+30. **`blurt-rag` is async, which the roadmap did not anticipate.** `lancedb`'s
+    API is async throughout, so `vectorstore` and `indexing` are too, and the
+    eventual search/ask commands in `blurt-app` will be `async fn` — supported
+    natively by Tauri v2. Not a problem: the roadmap already put a Tokio task in
+    `blurt-app` for the edit debounce, so tokio was arriving regardless.
+    `chunking` and `keywords` stay synchronous, being pure.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -259,6 +348,26 @@ one.
   ```
 
   PowerShell resolves Strawberry Perl correctly with no change.
+
+- **`lancedb` needs `protoc` on `PATH`.** LanceDB pulls `lance` → `prost-build`,
+  whose build script shells out to the Protocol Buffers compiler and fails with
+  `Could not find protoc` if it is absent. Installed 2026-09-02 via
+  `winget install --id Google.Protobuf --exact`, which puts `protoc.exe` at
+  `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Google.Protobuf_Microsoft.Winget.Source_8wekyb3d8bbwein`
+  and adds it to the user `PATH` — but **only for shells started afterwards**.
+  From Git Bash in an already-open session, prepend it explicitly:
+
+  ```bash
+  export PATH="/c/Users/adith/AppData/Local/Microsoft/WinGet/Packages/Google.Protobuf_Microsoft.Winget.Source_8wekyb3d8bbwe/bin:$PATH"
+  ```
+
+  Setting `PROTOC` to the full binary path works too, and is what CI would want.
+
+- **Piping `cargo` into `tail`/`head` hides its exit code.** `cargo build | tail
+  -40` reports *tail's* status, so a failed build looks like a success — this
+  cost a wasted cycle on the `protoc` failure above, which was reported as
+  "exited with code 0". Redirect to a file and check `$?`, or use
+  `set -o pipefail`, whenever the exit code matters.
 
 - **First build of `blurt-schema` compiles OpenSSL and SQLCipher from source**
   and takes several minutes. Incremental rebuilds after that are seconds.
@@ -325,6 +434,22 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-02 (session 3, continued)
+- Executed Phase 3: **Module 4's indexing pipeline**. `blurt-rag` gained
+  `chunking`, `embedding`, `keywords`, `vectorstore` and `indexing`;
+  `blurt-schema` gained migration `0002`, `is_item_indexable`,
+  `store_index_results`, `edits::get_by_id`, and the `embeddings`/`keywords`
+  repositories. TDD throughout. **247 tests green** (104 + 65 + 48 + 30), 6
+  `#[ignore]`d model-loading tests, `cargo clippy` clean on both crates.
+- Verified `fastembed`, `lancedb` and `yake-rust` against docs.rs/crates.io
+  before writing against them, per the roadmap's gate. That caught the
+  `TextInitOptions` rename and, later, the `lancedb` 0.38.0 regression
+  (decision #28).
+- Two real problems found and fixed rather than papered over: YAKE's
+  cross-process tag instability (decision #23) and the `lancedb` pin. Installed
+  `protoc`, which LanceDB's build needs — see Environment.
+- Decisions #21-#30 recorded above.
 
 ### 2026-09-02
 - Executed Phase 2 of the roadmap: **Module 3 is complete**. Built

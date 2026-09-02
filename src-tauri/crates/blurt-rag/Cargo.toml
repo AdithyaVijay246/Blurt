@@ -6,3 +6,34 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+thiserror = "2.0.20"
+uuid = "1.24.1"
+
+# The indexing pipeline reads eligibility and writes embeddings/keywords rows
+# through Module 2's repository layer.
+blurt-schema = { workspace = true }
+rusqlite = "0.40.2"
+
+# Embedding model (bge-small-en-v1.5, 384 dims) — MODULE_04 §2.
+fastembed = "6.0.2"
+
+# YAKE keyword extraction (MODULE_04 §3). Last released 2025-02-19: the API
+# surface used here is one pure function, and vendoring it is cheap if it rots.
+yake-rust = "1.0.3"
+
+# Vector store (MODULE_04 §3-§4). lancedb is async and Arrow-native, so the
+# arrow crates are pinned to the major version it builds against.
+# Pinned below 0.38: lancedb 0.38.0 does not compile without its `remote`
+# feature — `src/job.rs` uses `Error::Http`, which `src/error.rs` gates behind
+# that feature, while `pub mod job;` is left ungated. 0.37.1 does not reference
+# it at all. Enabling `remote` would compile a LanceDB Cloud REST client into a
+# local-first app to work around someone else's missing cfg, so pin instead.
+# Recheck on the next release.
+lancedb = "0.37.1"
+arrow-array = "58.0.0"
+arrow-schema = "58.0.0"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
