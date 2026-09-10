@@ -51,6 +51,30 @@ fn candidate_ceiling(text: &str) -> usize {
         .max(MAX_KEYWORDS)
 }
 
+/// The scale the total order over scores is defined at — see [`ordering_score`].
+const ORDER_PRECISION: f64 = 1e9;
+
+/// Rounds a YAKE score to the precision ordering is decided at.
+///
+/// The second half of decision #23, and the half the first pass missed. Asking
+/// YAKE for its whole candidate set stopped *it* truncating arbitrarily, but the
+/// scores this crate then sorts on are not themselves stable: YAKE accumulates
+/// its statistics in `HashMap` iteration order, and Rust derives a fresh hash
+/// seed for every map instance — so two [`extract`] calls on the same text, in
+/// the same process, return scores differing in their last bit or two.
+///
+/// That noise is many orders of magnitude below any real difference in
+/// importance, but `total_cmp` faithfully respects it, which is enough to swap
+/// two adjacent tags — and at the [`MAX_KEYWORDS`] cut, to change which tag
+/// survives at all. Rounding here collapses the noise so genuinely-tied phrases
+/// compare equal and the text tiebreak decides, deterministically.
+///
+/// Only ordering is affected. [`Keyword::score`] still carries the raw value,
+/// which is what Module 6 renders relative tag weight from.
+fn ordering_score(score: f64) -> f64 {
+    (score * ORDER_PRECISION).round()
+}
+
 /// An extracted key phrase.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keyword {
@@ -97,7 +121,13 @@ pub fn extract(text: &str) -> Vec<Keyword> {
 
     // Ascending, because YAKE scores importance downward from 0; then by text,
     // which is the tiebreak that makes the order total rather than incidental.
-    keywords.sort_by(|a, b| a.score.total_cmp(&b.score).then_with(|| a.text.cmp(&b.text)));
+    // Scores are compared at `ordering_score`'s precision so that float noise
+    // between runs cannot pre-empt that tiebreak.
+    keywords.sort_by(|a, b| {
+        ordering_score(a.score)
+            .total_cmp(&ordering_score(b.score))
+            .then_with(|| a.text.cmp(&b.text))
+    });
 
     let mut seen = std::collections::HashSet::new();
     keywords.retain(|keyword| seen.insert(keyword.text.clone()));
@@ -181,13 +211,55 @@ mod tests {
         assert_eq!(seen.len(), before, "duplicate tags would render twice");
     }
 
+    /// Two values actually observed for the same phrase, from two `extract`
+    /// calls in a single process. A difference this small must not be allowed
+    /// to decide which of two tags ranks higher.
+    #[test]
+    fn scores_within_float_noise_order_as_a_tie() {
+        let a = 0.004808761140491637_f64;
+        let b = 0.004808761140491634_f64;
+
+        assert_ne!(a, b, "precondition: these really are distinct floats");
+        assert_eq!(
+            ordering_score(a).total_cmp(&ordering_score(b)),
+            std::cmp::Ordering::Equal,
+            "float noise must not break the tie that text ordering exists to break"
+        );
+    }
+
+    #[test]
+    fn a_real_difference_in_importance_still_orders() {
+        // The rounding must not be so coarse that it flattens distinctions that
+        // actually matter. These two are adjacent real scores from `NOTE`.
+        assert_eq!(
+            ordering_score(0.004808761140491637).total_cmp(&ordering_score(0.026774707253466916)),
+            std::cmp::Ordering::Less
+        );
+    }
+
     #[test]
     fn extraction_is_deterministic() {
+        let first = extract(NOTE);
+        let second = extract(NOTE);
+
+        // The tags and their order are the guarantee: that is what renders as a
+        // tag list, and what the `MAX_KEYWORDS` cut selects from. Scores are
+        // compared with a tolerance rather than bit-for-bit — see
+        // `ordering_score` for why they carry noise between calls.
         assert_eq!(
-            extract(NOTE),
-            extract(NOTE),
-            "the same text must always produce the same tags"
+            texts(&first),
+            texts(&second),
+            "the same text must always produce the same tags, in the same order"
         );
+        for (a, b) in first.iter().zip(&second) {
+            assert!(
+                (a.score - b.score).abs() < 1e-12,
+                "scores for {:?} drifted further than float noise explains: {} vs {}",
+                a.text,
+                a.score,
+                b.score
+            );
+        }
     }
 
     #[test]

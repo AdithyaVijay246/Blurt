@@ -11,6 +11,7 @@
 //! it lives in the SQL itself.
 
 pub mod chunking;
+pub mod classify;
 pub mod embedding;
 pub mod error;
 pub mod indexing;

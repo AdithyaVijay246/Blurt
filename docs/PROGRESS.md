@@ -30,10 +30,8 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** Phase 5 of the roadmap — Module 4's Sleep-Mode, the LLM half:
-`classify.rs`, `model_manager.rs`, `synthesis.rs` in `blurt-rag`. Start with
-`classify.rs` (§9's pure local heuristics — trailing `?`, interrogative words,
-inverted auxiliary; no model involved), because it needs nothing external.
+**Next action:** continue Phase 5 — Module 4's Sleep-Mode. `classify.rs` is
+**done**; `model_manager.rs` and `synthesis.rs` remain.
 
 **Verify `llama-cpp-2`'s API before writing `model_manager.rs`** — the roadmap
 flags it as the highest external-API risk in the whole plan, and the two
@@ -48,7 +46,18 @@ model is the same problem — solve both together.
 `synthesis.rs` composes `search::hybrid_search` with
 `RetrievalWindow::SLEEP_MODE_DEFAULT`, which is finished and waiting.
 
-**Just finished:** Phase 4 — Module 4's hybrid retrieval, all of §4–§7, in a new
+**Just finished:** `classify.rs` — §9's statement-vs-question split. Three
+signals, any one sufficient: a trailing `?`, an interrogative opening word, or a
+fronted auxiliary. Two of the three work without punctuation on purpose, since
+voice capture supplies none. Deliberately imperfect per §9, and the tests pin
+the accepted false positives ("what a day") rather than pretending they don't
+exist. Decision #39 covers the contraction handling that cost a bug.
+
+Fixing that bug surfaced a **latent nondeterminism in `keywords.rs` dating from
+Phase 3** — see decision #40. Worth reading before trusting anything else that
+sorts on a float in this codebase.
+
+**Before that:** Phase 4 — Module 4's hybrid retrieval, all of §4–§7, in
 `blurt-rag/src/search.rs`:
 
 - **`hybrid_search`** — embeds the query, over-fetches vector candidates, and
@@ -64,7 +73,7 @@ model is the same problem — solve both together.
   than its default squared L2 (decision #31) — the one change outside the new
   file.
 
-Decisions #31–#38 below cover the scoring formula, the keyword-side design, the
+Decisions #31–#40 below cover the scoring formula, the keyword-side design, the
 pagination shape, and the two determinism traps.
 
 **Known gap, still deliberately left for Phase 6:** marking an *existing*
@@ -89,12 +98,12 @@ the vectors existing at all.
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
 | `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4 |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
-| `blurt-rag` (M4) | **Partial, green** | Indexing *and* retrieval done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`. All of §3–§7. Sleep-Mode (§8-§9, the generative half) is Phase 5 — `classify`/`model_manager`/`synthesis` do not exist yet |
+| `blurt-rag` (M4) | **Partial, green** | Indexing, retrieval and §9 classification done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`. Sleep-Mode's generative half (§8) is what remains — `model_manager`/`synthesis` do not exist yet |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
 
-**283 tests green** across the workspace as of the last commit (104
-`blurt-schema` + 65 `blurt-router` + 84 `blurt-rag` + 30 `blurt-app`), plus 8
+**298 tests green** across the workspace as of the last commit (104
+`blurt-schema` + 65 `blurt-router` + 99 `blurt-rag` + 30 `blurt-app`), plus 8
 `#[ignore]`d — and those 8 were run and confirmed green this session, not just
 assumed. Test command (note the PATH requirements under Environment below):
 
@@ -438,6 +447,60 @@ one.
     launches. The same class of bug as decision #23's YAKE tag instability, and
     caught by remembering it.
 
+39. **The §9 classifier reduces contractions, and does it in two steps because
+    one is not enough.** Voice capture supplies no `?` (`MODULE_03_ROUTER.md`
+    §4), so two of §9's three signals have to work on bare words — which makes
+    contractions load-bearing rather than cosmetic. The first draft cut the
+    opening word at its apostrophe and stopped there. That is right for
+    "what's" → `what`, and wrong for "didn't" → `didn`, because the negation's
+    `n` sits on the *auxiliary's* side of the apostrophe. Stripping that `n`
+    unconditionally is wrong the other way: "can't" is already `can` + `t`, and
+    taking an `n` off gives `ca`. So `opens_a_question` tests both the head and
+    its `n`-stripped form. That is safe rather than merely convenient: no word
+    in either list is another list word plus an `n`, so trying both cannot
+    invent a match. "won't" is still missed (`wo`), which is irregular and rare
+    enough to leave. Both the ASCII `'` and the typographic `’` phone keyboards
+    insert are handled.
+
+    Two smaller calls in the same file. Content-free input ("", "?") classifies
+    as a **statement**, because a captured stray character is one tap to delete
+    whereas one routed to Sleep-Mode vanishes into an empty search. And the
+    known false positives are asserted in tests as *current behaviour* rather
+    than left undocumented — "what a day", "how to reset the router", "can of
+    paint" all classify as questions. §9 explicitly declines to engineer around
+    that direction, so the tests exist to make the accepted cost visible, not
+    to demand a fix. If real usage shows the interrogative-opening rule is too
+    eager, the tuning knob is to require an inversion after the wh-word ("what
+    *did* I") rather than accept a bare one — a behaviour change, so it belongs
+    to real-usage data rather than a guess.
+
+40. **Decision #23 was half a fix, and the missing half was a real bug.**
+    Asking YAKE for its whole candidate set stopped *it* truncating in hash
+    order — but the scores this crate then sorts on are not stable either.
+    `yake-rust` accumulates its statistics through `HashMap`s, and Rust derives
+    a fresh hash seed per map *instance* (`RandomState` bumps a thread-local
+    counter), so summation order differs between two `extract` calls **in the
+    same process**. The scores come back differing in their last bit or two.
+
+    That is far below any meaningful difference in importance, but `total_cmp`
+    respects it faithfully — which is enough to swap two adjacent tags, and at
+    the `MAX_KEYWORDS` cut, to change which tag survives at all. Exactly the
+    user-visible symptom #23 was written to eliminate, via a second mechanism
+    it did not cover. `ordering_score` now rounds to 1e-9 before comparing, so
+    genuinely-tied phrases compare equal and the existing text tiebreak decides
+    deterministically. `Keyword::score` still carries the raw value, since
+    Module 6 renders relative tag weight from it.
+
+    Caught because `extraction_is_deterministic` compared two `Vec<Keyword>`
+    with `assert_eq!`, and the derived `PartialEq` compares `f64` bit-for-bit —
+    so the test was itself flaky, passing most runs. It now asserts what is
+    actually guaranteed: identical tag *texts* in identical order, with scores
+    compared to a tolerance. **The general lesson for this codebase: never sort
+    user-visible output on a raw float that came out of a hash-ordered
+    accumulation.** `search::rank` already avoids this by tiebreaking on
+    `item_id` (decision #38); it was written before this was understood, and
+    got there for the adjacent reason rather than this one.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -553,6 +616,24 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-10 (session 4, continued)
+- Started Phase 5: **`classify.rs`**, §9's statement-vs-question split. Pure
+  local heuristics, no model — trailing `?`, interrogative opening, fronted
+  auxiliary. TDD, Red confirmed against a `todo!()` first. 13 tests.
+- **Two bugs, both real, both caught by tests rather than reasoning.** The
+  contraction handling was wrong for "didn't"/"isn't" (decision #39) — the
+  apostrophe split leaves `didn`, not `did`, and my doc comment had confidently
+  claimed otherwise. And fixing it surfaced **decision #40**: `keywords.rs` has
+  been nondeterministic since Phase 3 in a way decision #23 did not cover, with
+  `extraction_is_deterministic` flaky all along because it compared `f64`s
+  bit-for-bit. Fixed at the source (`ordering_score` rounds before comparing)
+  rather than by loosening the assertion, then confirmed stable over five
+  consecutive full runs.
+- **298 tests green** (104 + 65 + 99 + 30), 8 `#[ignore]`d, `cargo clippy -p
+  blurt-rag` clean.
+- Still ahead in Phase 5: `model_manager.rs` and `synthesis.rs`. The
+  `llama-cpp-2` verification gate has **not** been done yet — do it first.
 
 ### 2026-09-10 (session 4)
 - Executed Phase 4: **Module 4's hybrid retrieval**. New `blurt-rag/src/search.rs`
