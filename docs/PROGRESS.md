@@ -18,11 +18,11 @@ tracks that.
 
 Remote: `https://github.com/AdithyaVijay246/Blurt`
 
-Last updated: 2026-09-02
+Last updated: 2026-09-10
 
 A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
-is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1-3
-below are done; Phases 4-6 (retrieval, Sleep-Mode, final wiring) are still
+is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1-4
+below are done; Phases 5-6 (Sleep-Mode, final wiring) are still
 ahead. Read that plan file at the start of the next session
 rather than re-deriving the sequencing here.
 
@@ -30,46 +30,53 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** Phase 4 of the roadmap — Module 4's hybrid retrieval, in a new
-`blurt-rag/src/search.rs`. `hybrid_search` combines the vector side
-(`vectorstore::search`) with the keyword side
-(`blurt_schema::repository::keywords::items_matching_any`, which already
-excludes sensitive and tombstoned items structurally), dedupes by `itemId`,
-and sorts by pure relevance with **no recency re-weighting** — §4 is explicit
-that time-scoping at the window level already handles recency. Then `@`-scoping
-as a post-query re-sort into in-scope/elsewhere groups (§6: soft
-prioritization, never a `WHERE` filter), the `RetrievalWindow` filter on
-`editedAt`, and path/timestamp attachment per §7.
+**Next action:** Phase 5 of the roadmap — Module 4's Sleep-Mode, the LLM half:
+`classify.rs`, `model_manager.rs`, `synthesis.rs` in `blurt-rag`. Start with
+`classify.rs` (§9's pure local heuristics — trailing `?`, interrogative words,
+inverted auxiliary; no model involved), because it needs nothing external.
 
-Everything Phase 4 needs is in place: `embeddings::get_by_vector_ref` turns a
-LanceDB hit into a displayable row, and `destinations::path` computes the
-display path.
+**Verify `llama-cpp-2`'s API before writing `model_manager.rs`** — the roadmap
+flags it as the highest external-API risk in the whole plan, and the two
+verification passes that have already happened both caught real breakage
+(`fastembed`'s `TextInitOptions` rename, the `lancedb` 0.38 regression). The
+vendored crate source under `~/.cargo/registry/src/*/` is a better check than
+docs.rs when a version is pinned — it is the exact code that will compile. Also
+verify Tauri v2's resource-bundling/path-resolution API for locating the
+bundled GGUF, and note that decision #29's bundling problem for the *embedding*
+model is the same problem — solve both together.
 
-**Just finished:** Phase 3 — Module 4's LLM-free indexing pipeline. `blurt-rag`
-now runs a capture or edit end to end into chunks, vectors and tags:
+`synthesis.rs` composes `search::hybrid_search` with
+`RetrievalWindow::SLEEP_MODE_DEFAULT`, which is finished and waiting.
 
-- **`chunking.rs`** — 180-word chunks with 30 words of overlap (~17%, inside
-  §3's 15-20% band), each carrying the character range §7's jump-to-chunk
-  needs. Word budget is deliberately *below* §3's 256-token limit; see decision
-  #21.
-- **`embedding.rs`** — `fastembed`/bge-small-en-v1.5, 384 dims, model loaded
-  lazily on first real use.
-- **`keywords.rs`** — YAKE via `yake-rust`, made deterministic across processes
-  (decision #23 — this was a real bug).
-- **`vectorstore.rs`** — LanceDB wrapper: open/create, add, nearest-neighbour
-  search, delete-by-item.
-- **`indexing.rs`** — `index_item` / `remove_item`, LanceDB first then one
-  SQLCipher transaction.
-- **`blurt-schema`** — migration `0002` (nullable `embeddings.editId`),
-  `is_item_indexable`, `store_index_results`, `edits::get_by_id`, and two new
-  repositories: `repository/embeddings.rs` and `repository/keywords.rs`.
+**Just finished:** Phase 4 — Module 4's hybrid retrieval, all of §4–§7, in a new
+`blurt-rag/src/search.rs`:
 
-**Known gap, deliberately left for Phase 6:** marking an *existing* destination
-sensitive stops future indexing but does not retract what was already indexed.
-§3 says sensitive content is invisible to the pipeline, so that transition has
-to call `blurt_rag::indexing::remove_item` for its items. It is orchestration
-and belongs with the command that flips the flag, which does not exist yet.
-Noted in `indexing.rs`'s module docs too.
+- **`hybrid_search`** — embeds the query, over-fetches vector candidates, and
+  hands them to `rank`. The async, model-dependent shell.
+- **`rank`** — the whole of the ranking policy, and `pub(crate)` rather than
+  private specifically so it can be tested without loading a model: given hand-
+  built `VectorMatch` values, everything else is SQLCipher reads and
+  arithmetic. 21 of the 24 new tests run this way, in milliseconds. Same
+  testability-driven split as decision #13, for the same reason.
+- **`query_terms`** / **`RetrievalWindow`** — the pure pieces: n-gram expansion
+  of a query, and §5's time window.
+- **`vectorstore::search`** now asks LanceDB for **cosine** distance rather
+  than its default squared L2 (decision #31) — the one change outside the new
+  file.
+
+Decisions #31–#38 below cover the scoring formula, the keyword-side design, the
+pagination shape, and the two determinism traps.
+
+**Known gap, still deliberately left for Phase 6:** marking an *existing*
+destination sensitive stops future indexing but does not retract what was
+already indexed. §3 says sensitive content is invisible to the pipeline, so that
+transition has to call `blurt_rag::indexing::remove_item` for its items. It is
+orchestration and belongs with the command that flips the flag, which does not
+exist yet. Noted in `indexing.rs`'s module docs too. **Retrieval no longer
+depends on that being fixed** — `search::rank` re-checks `is_item_indexable` per
+candidate (decision #36), so such content is unreachable through search in the
+meantime. The Phase 6 purge is still needed to reclaim the space and to stop
+the vectors existing at all.
 
 ## Status by component
 
@@ -82,18 +89,20 @@ Noted in `indexing.rs`'s module docs too.
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
 | `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4 |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
-| `blurt-rag` (M4) | **Partial, green** | Indexing pipeline done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`. Retrieval (`search.rs`) and Sleep-Mode are Phases 4-5 |
+| `blurt-rag` (M4) | **Partial, green** | Indexing *and* retrieval done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`. All of §3–§7. Sleep-Mode (§8-§9, the generative half) is Phase 5 — `classify`/`model_manager`/`synthesis` do not exist yet |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
 
-**247 tests green** across the workspace as of the last commit (104
-`blurt-schema` + 65 `blurt-router` + 48 `blurt-rag` + 30 `blurt-app`), plus 6
-`#[ignore]`d. Test command (note the PATH requirements under Environment
-below):
+**283 tests green** across the workspace as of the last commit (104
+`blurt-schema` + 65 `blurt-router` + 84 `blurt-rag` + 30 `blurt-app`), plus 8
+`#[ignore]`d — and those 8 were run and confirmed green this session, not just
+assumed. Test command (note the PATH requirements under Environment below):
 
 ```bash
 cargo test --workspace
-cargo test -p blurt-rag -- --ignored   # loads the real ~100MB embedding model
+# The real ~100MB embedding model. --test-threads=1 is REQUIRED, not optional:
+# see the shared-model-cache note under Environment.
+cargo test -p blurt-rag -- --ignored --test-threads=1
 ```
 
 Use `--no-fail-fast` when you want the whole workspace's results: without it
@@ -337,6 +346,98 @@ one.
     `blurt-app` for the edit debounce, so tokio was arriving regardless.
     `chunking` and `keywords` stay synchronous, being pure.
 
+31. **The vector store asks LanceDB for cosine distance, not its default
+    squared L2.** Set in `vectorstore::search`, and the only Phase 4 change
+    outside `search.rs`. Phase 4 is where a distance first becomes a *score*,
+    and only cosine gives that conversion a stable meaning: `1 - distance` is
+    the cosine similarity, 1 for an identical direction and 0 for an orthogonal
+    one. Under squared L2 an orthogonal pair comes back as `2`, which the same
+    arithmetic would read as similarity `-1` — sorting a weak match below one
+    that never matched at all. Caught by writing the test first;
+    `distance_is_cosine_distance_so_it_can_be_read_as_similarity` pins it, and
+    it fails with `got 2` if the metric is ever dropped. Note for whenever a
+    vector *index* is added: LanceDB requires the query's distance type to
+    match the type the index was trained with, or results are silently invalid.
+
+32. **Keyword-side query terms are enumerated n-grams, not YAKE output.**
+    `query_terms` emits every contiguous run of 1..=`NGRAM_SIZE` words,
+    lowercased and stripped of edge punctuation, to match how
+    `keywords::extract` stores them. Running YAKE on the query instead would be
+    asking an unsupervised statistical method to find the important terms in a
+    two-word text that is all important terms, and it could discard the very
+    word the user searched for. Two properties make the naive approach safe:
+    the stored side is already stopword-filtered, so an unfiltered query n-gram
+    containing "the" simply matches nothing; and the expansion is capped at
+    `MAX_QUERY_TERMS = 200` because the lookup binds one SQL variable per term
+    against SQLite's default 999 ceiling. Unigrams are emitted first so
+    truncation costs a long query its phrases, never its individual words.
+
+33. **Hybrid score formula** (no formula is given in
+    `MODULE_04_EMBEDDINGS_RAG.md`, and it is not in §11's deferred list, so it
+    is an implementation detail in the same sense as decision #17's NL
+    confidence score):
+
+    `score = clamp(1 - cosine_distance, 0, 1) + 0.25 × (1 - 0.5^keyword_hits)`
+
+    The semantic half occupies `0.0..=1.0`; the keyword half is capped at 0.25,
+    enough to lift an exact-term match past a marginally closer paraphrase and
+    never enough to lift a semantically unrelated item above a strong match.
+    The `1 - 0.5^n` curve matters at both ends and the first draft got it
+    wrong: a linear ramp saturating at three hits gave a single hit only
+    0.083, too little to close even a 0.1 semantic gap — which left §4's
+    "exact-term lookup" case unserved, since most queries are a single phrase
+    matching a single stored tag. A failing test caught it. The first hit now
+    earns half the boost; the asymptote is what still stops a heavily-tagged
+    note out-ranking a precisely relevant one purely for carrying more tags.
+
+34. **Keyword matching boosts; it does not recall.** An item whose tags match
+    but which produced no vector hit is *not* injected into the results. §4
+    calls the keyword half "boosting", and §7 is the reason to read that
+    literally: every result must be able to jump to the chunk that matched,
+    scrolled and highlighted, and a keyword-only hit has no matching chunk to
+    jump to — it would be a different kind of object wearing the same shape.
+    `VECTOR_OVERFETCH = 8` is what keeps this from costing recall: the vector
+    side is asked for eight times the requested page, so an exact-term match is
+    almost always already in the candidate set waiting to be boosted.
+
+35. **The window filters on the version's own timestamp, and the result carries
+    that same timestamp.** `edits.editedAt` for an edit chunk, `items.createdAt`
+    for an original capture (roadmap decision #4, now implemented). One
+    consequence worth stating: an item captured a year ago but edited today is
+    *recent content* and stays in a 30-day window, which is the intent — §3
+    embeds each version separately precisely so versions are independent.
+    Using one timestamp for both filtering and display means §5's scoping and
+    §7's displayed date can never disagree. A timestamp in the *future* is
+    never excluded: Module 5 syncs from devices whose clocks may run fast, and
+    dropping the newest thing the user wrote for being too recent helps nobody.
+
+36. **Retrieval re-checks `is_item_indexable` per candidate.** That function is
+    named for indexing but states exactly the rule retrieval needs — live item,
+    live destination, not sensitive — so it is asked rather than duplicated.
+    This is what closes the window on the Phase 6 gap above: a destination
+    marked sensitive after its items were indexed still has vectors sitting in
+    LanceDB, and without this check a search would surface them. Guarded by
+    `an_item_whose_destination_became_sensitive_after_indexing_is_dropped`.
+    Orphaned vectors (written to LanceDB by a pass interrupted before its
+    SQLCipher commit — the interruption `indexing.rs` deliberately tolerates)
+    are skipped the same way, per candidate, rather than failing the query.
+
+37. **Pagination is offset-based over an over-fetched candidate set, not a
+    cursor.** Page N is taken from a candidate set sized for pages 1..N, so
+    deep pagination degrades. A real cursor would mean keeping ranking state
+    between calls; §5 asks for pagination on plain search, which in a personal
+    log is a handful of pages, and this is not worth building until the
+    behaviour is observed to matter. Documented on `hybrid_search` itself so
+    the limitation is visible at the call site rather than only here.
+
+38. **Result ordering is total, including its tiebreak.** Scope group first
+    (§6's two sections), then score descending, then `item_id`. The last term
+    is not decoration: `rank` deduplicates chunks through a `HashMap`, whose
+    iteration order Rust reseeds per process, so without it two identical
+    queries could return tied results in different orders on different app
+    launches. The same class of bug as decision #23's YAKE tag instability, and
+    caught by remembering it.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -362,6 +463,24 @@ one.
   ```
 
   Setting `PROTOC` to the full binary path works too, and is what CI would want.
+
+- **The `#[ignore]`d model tests must run with `--test-threads=1`.** Run in
+  parallel, 7 of the 8 fail: they share one `fastembed` cache directory and
+  several `TextEmbedding::try_new` calls racing on it conflict, so whichever
+  test gets there first passes and the rest error. Serially all 8 pass in ~5s.
+  This is a test-harness artifact, not a product bug — the app constructs one
+  `Embedder` and holds it — but the parallel failure looks alarming and
+  convincing enough to send a future session debugging the wrong thing:
+
+  ```bash
+  cargo test -p blurt-rag -- --ignored --test-threads=1
+  ```
+
+- **This repo is not `rustfmt`-formatted; do not run `cargo fmt`.** The code is
+  hand-formatted to a wider line budget than rustfmt's default, so
+  `cargo fmt -p <crate>` reformats existing untouched files and buries a real
+  diff in noise. Match the surrounding style by hand instead. (`cargo fmt --
+  --check` is still useful for *reading* what it would object to.)
 
 - **Piping `cargo` into `tail`/`head` hides its exit code.** `cargo build | tail
   -40` reports *tail's* status, so a failed build looks like a success — this
@@ -434,6 +553,35 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-10 (session 4)
+- Executed Phase 4: **Module 4's hybrid retrieval**. New `blurt-rag/src/search.rs`
+  covers all of §4–§7 — `query_terms`, `RetrievalWindow`, `rank`, and the async
+  `hybrid_search`. TDD throughout, every pass Red-confirmed against a `todo!()`
+  before implementing. **283 tests green** (104 + 65 + 84 + 30), and the 8
+  `#[ignore]`d model tests were run and confirmed green too, which had not been
+  done before. `cargo clippy -p blurt-rag` clean.
+- Set the vector store's distance metric to **cosine** (decision #31). Phase 4
+  is the first code to read a distance as a similarity, and LanceDB's default
+  squared L2 would have made an orthogonal pair score `-1`. The test was written
+  first and failed with `got 2`, which is exactly the bug it was written to
+  catch.
+- **The first scoring formula was wrong and a test caught it** (decision #33): a
+  linear keyword boost saturating at three hits gave a single exact-phrase match
+  too little weight to close even a small semantic gap — leaving §4's
+  "exact-term lookup" case unserved for the most common query shape. Replaced
+  with a diminishing-returns curve where the first hit earns half the boost.
+  Fixed the formula rather than the assertion; the test was encoding the intent
+  correctly.
+- Split ranking policy (`rank`) from the model-dependent shell
+  (`hybrid_search`) so 21 of 24 new tests need no embedding model and run in
+  milliseconds — the same testability-driven split as decision #13.
+- Decisions #31-#38 recorded above; two new environment gotchas (the
+  `--test-threads=1` requirement for the ignored tests, and "don't run
+  `cargo fmt`").
+- Left alone deliberately: two pre-existing `clippy` warnings in
+  `blurt-schema/src/keyring.rs` (`&Vec` vs `&[_]`, `is_multiple_of`). They come
+  from newer lints, not from this work, and are unrelated to Module 4.
 
 ### 2026-09-02 (session 3, continued)
 - Executed Phase 3: **Module 4's indexing pipeline**. `blurt-rag` gained

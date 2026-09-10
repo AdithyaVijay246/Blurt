@@ -132,6 +132,14 @@ impl VectorStore {
     }
 
     /// The `limit` nearest vectors to `query`, closest first.
+    ///
+    /// Distances are **cosine** distances, not LanceDB's default squared L2.
+    /// The metric is fixed here rather than left to the caller because
+    /// [`crate::search`] has to turn a distance into a relevance score, and
+    /// only cosine gives that conversion a stable meaning: `1 - distance` is
+    /// the cosine similarity, 1 for an identical direction and 0 for an
+    /// orthogonal one. Squared L2 would put an orthogonal pair at 2 and read
+    /// back as a negative similarity.
     pub async fn search(&self, query: &[f32], limit: usize) -> Result<Vec<VectorMatch>> {
         if query.len() != EMBEDDING_DIMENSIONS {
             return Err(RagError::VectorStore(format!(
@@ -148,6 +156,7 @@ impl VectorStore {
             .query()
             .nearest_to(query)
             .map_err(|e| RagError::VectorStore(e.to_string()))?
+            .distance_type(lancedb::DistanceType::Cosine)
             .limit(limit)
             .execute()
             .await
@@ -354,6 +363,33 @@ mod tests {
         let hits = store.search(&vector(0), 1).await.unwrap();
         assert_eq!(hits[0].vector_ref, "chunk-0");
         assert_eq!(hits[0].item_id, item, "without the item id a hit joins to nothing");
+    }
+
+    #[tokio::test]
+    async fn distance_is_cosine_distance_so_it_can_be_read_as_similarity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(&dir).await;
+        let item = Uuid::new_v4();
+        store
+            .add(&[record("same", item, 0), record("orthogonal", item, 1)])
+            .await
+            .unwrap();
+
+        let hits = store.search(&vector(0), 2).await.unwrap();
+        let distance = |vector_ref: &str| {
+            hits.iter().find(|h| h.vector_ref == vector_ref).unwrap().distance
+        };
+
+        // Cosine distance is `1 - cos`, so an identical vector sits at 0 and an
+        // orthogonal one at exactly 1. Under LanceDB's default L2 metric the
+        // orthogonal pair would come back as 2 instead, which `search.rs` would
+        // silently read as a *negative* similarity.
+        assert!(distance("same").abs() < 1e-5, "got {}", distance("same"));
+        assert!(
+            (distance("orthogonal") - 1.0).abs() < 1e-5,
+            "got {}",
+            distance("orthogonal")
+        );
     }
 
     #[tokio::test]

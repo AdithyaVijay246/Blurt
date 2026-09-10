@@ -15,6 +15,7 @@ pub mod embedding;
 pub mod error;
 pub mod indexing;
 pub mod keywords;
+pub mod search;
 pub mod vectorstore;
 
 pub use error::{RagError, Result};
