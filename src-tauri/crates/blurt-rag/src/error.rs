@@ -30,6 +30,16 @@ pub enum RagError {
     #[error("vector store error: {0}")]
     VectorStore(String),
 
+    /// The generative model could not be loaded — a missing or corrupt GGUF,
+    /// or not enough memory to hold it. Distinct from [`Self::Generation`]
+    /// because only this one is worth retrying with a different model file.
+    #[error("could not load the generative model: {0}")]
+    ModelLoad(String),
+
+    /// The generative model loaded but inference failed.
+    #[error("generation failed: {0}")]
+    Generation(String),
+
     /// An edit id was handed in that no `edits` row matches. A caller bug
     /// rather than an ordinary skip, so it surfaces rather than passing
     /// quietly as "nothing to index".

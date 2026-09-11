@@ -34,6 +34,21 @@ arrow-array = "58.0.0"
 arrow-schema = "58.0.0"
 futures = "0.3"
 
+# Sleep-Mode's generative model (MODULE_04 §2, §8) — Qwen2.5-3B-Instruct GGUF
+# via llama.cpp, loaded in-process rather than through an Ollama sidecar
+# (MODULE_01 §1 rules out a second runtime).
+#
+# Pinned exactly, unlike everything else here. `llama-cpp-2` is 0.x, so cargo's
+# caret would accept every 0.1.x — and those track upstream llama.cpp, which
+# moves its own C API between releases. An FFI crate whose patch bumps can carry
+# an upstream API change is not one to float. Re-pin deliberately, and re-read
+# `model_manager.rs`'s llama section when doing so.
+#
+# Build requirements, none of which cargo installs for you: CMake, a C++
+# toolchain, and **libclang** (llama-cpp-sys-2 runs bindgen). See PROGRESS.md's
+# Environment section.
+llama-cpp-2 = "=0.1.156"
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

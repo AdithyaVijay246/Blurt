@@ -18,7 +18,7 @@ tracks that.
 
 Remote: `https://github.com/AdithyaVijay246/Blurt`
 
-Last updated: 2026-09-10
+Last updated: 2026-09-11
 
 A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
 is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1-4
@@ -30,32 +30,53 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** continue Phase 5 — Module 4's Sleep-Mode. `classify.rs` is
-**done**; `model_manager.rs` and `synthesis.rs` remain.
+**Next action:** finish Phase 5 with the **real llama.cpp backend**. Everything
+around it is done and green: `classify.rs`, `model_manager.rs` (the §3 lifecycle
+service) and `synthesis.rs` (grounded prompt + §8 answer shape). What is missing
+is one type — a `ModelLoader`/`TextGenerator` implementation backed by
+`llama-cpp-2` — plus locating the bundled GGUF.
 
-**Verify `llama-cpp-2`'s API before writing `model_manager.rs`** — the roadmap
-flags it as the highest external-API risk in the whole plan, and the two
-verification passes that have already happened both caught real breakage
-(`fastembed`'s `TextInitOptions` rename, the `lancedb` 0.38 regression). The
-vendored crate source under `~/.cargo/registry/src/*/` is a better check than
-docs.rs when a version is pinned — it is the exact code that will compile. Also
-verify Tauri v2's resource-bundling/path-resolution API for locating the
-bundled GGUF, and note that decision #29's bundling problem for the *embedding*
-model is the same problem — solve both together.
+**The dependency is added and verified to compile** (`llama-cpp-2 = "=0.1.156"`),
+so the roadmap's highest-risk item is cleared, but **nothing references it yet**.
+Its API was read from the vendored 0.1.156 source and differs from the published
+docs in two ways that shape the implementation — see decision #41 before writing
+against it. In short: hold `LlamaBackend` in a process-wide `OnceLock` (it errors
+on a second `init()`), build the `LlamaContext` inside each generate call (it
+borrows the model), and note `LlamaSampler::sample` takes `&mut self`.
 
-`synthesis.rs` composes `search::hybrid_search` with
-`RetrievalWindow::SLEEP_MODE_DEFAULT`, which is finished and waiting.
+The generation loop shape, confirmed against that source:
+`str_to_token(prompt, AddBos::Always)` -> fill a `LlamaBatch` -> `context.decode`
+-> loop { `sampler.sample(&context, 0)`; stop at `model.token_eos()`;
+`model.token_to_str(token, Special::Tokenize)` } .
 
-**Just finished:** `classify.rs` — §9's statement-vs-question split. Three
-signals, any one sufficient: a trailing `?`, an interrogative opening word, or a
-fronted auxiliary. Two of the three work without punctuation on purpose, since
-voice capture supplies none. Deliberately imperfect per §9, and the tests pin
-the accepted false positives ("what a day") rather than pretending they don't
-exist. Decision #39 covers the contraction handling that cost a bug.
+**Still open, and needed before the app can ship:** the bundled GGUF itself.
+`BLUEPRINT.md` §2 requires the generative model to ship *with* the app rather
+than download on demand, and Tauri v2's resource-bundling/path-resolution API is
+still unverified. Decision #29's identical problem for the *embedding* model is
+unsolved too — `fastembed` still downloads from Hugging Face on first load.
+Solve both together; they are one problem wearing two hats.
 
-Fixing that bug surfaced a **latent nondeterminism in `keywords.rs` dating from
-Phase 3** — see decision #40. Worth reading before trusting anything else that
-sorts on a float in this codebase.
+**Just finished:** the rest of Phase 5.
+
+- **`classify.rs`** — §9's statement-vs-question split. Three signals, any one
+  sufficient: a trailing `?`, an interrogative opening, or a fronted auxiliary.
+  Two of the three work without punctuation, since voice capture supplies none.
+  Deliberately imperfect per §9; the tests pin the accepted false positives
+  ("what a day") rather than pretending they do not exist. Decision #39 covers
+  the contraction handling that cost a bug.
+- **`model_manager.rs`** — §3's mandated service: load on a question, unload
+  immediately after, never resident. A trait seam makes all of that testable
+  with no model at all, and the unload is unconditional so a *failed*
+  generation still unloads. Decision #42.
+- **`synthesis.rs`** — the grounded prompt and §8's answer shape. §11's deferred
+  top-N cap is resolved as a **token budget** (decision #43, chosen by the
+  user), because llama.cpp truncates an over-long prompt without reporting it.
+  There is deliberately no all-in-one `answer_question` — decision #44 explains
+  why, and gives Phase 6 the composition to use instead.
+
+Fixing a classifier bug also surfaced a **latent nondeterminism in `keywords.rs`
+dating from Phase 3** — see decision #40. Worth reading before trusting anything
+else in this codebase that sorts on a float.
 
 **Before that:** Phase 4 — Module 4's hybrid retrieval, all of §4–§7, in
 `blurt-rag/src/search.rs`:
@@ -73,7 +94,7 @@ sorts on a float in this codebase.
   than its default squared L2 (decision #31) — the one change outside the new
   file.
 
-Decisions #31–#40 below cover the scoring formula, the keyword-side design, the
+Decisions #31–#47 below cover the scoring formula, the keyword-side design, the
 pagination shape, and the two determinism traps.
 
 **Known gap, still deliberately left for Phase 6:** marking an *existing*
@@ -98,14 +119,16 @@ the vectors existing at all.
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
 | `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4 |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
-| `blurt-rag` (M4) | **Partial, green** | Indexing, retrieval and §9 classification done: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`. Sleep-Mode's generative half (§8) is what remains — `model_manager`/`synthesis` do not exist yet |
+| `blurt-rag` (M4) | **Partial, green** | All of §3–§9 except the real model backend: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`/`model_manager`/`synthesis`. `llama-cpp-2` is added and compiles but **nothing uses it yet** — the `ModelLoader` impl and the bundled GGUF are what is left |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
 | `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
 
-**298 tests green** across the workspace as of the last commit (104
-`blurt-schema` + 65 `blurt-router` + 99 `blurt-rag` + 30 `blurt-app`), plus 8
-`#[ignore]`d — and those 8 were run and confirmed green this session, not just
-assumed. Test command (note the PATH requirements under Environment below):
+**317 tests green** across the workspace as of the last commit (104
+`blurt-schema` + 65 `blurt-router` + 118 `blurt-rag` + 30 `blurt-app`), plus 8
+`#[ignore]`d — and those 8 were last run and confirmed green on 2026-09-10, not
+just assumed. None of this round's new tests are `#[ignore]`d: `model_manager`
+and `synthesis` are tested entirely through fakes, which is the point of their
+trait seam. Test command (note the PATH requirements under Environment below):
 
 ```bash
 cargo test --workspace
@@ -501,6 +524,103 @@ one.
     `item_id` (decision #38); it was written before this was understood, and
     got there for the adjacent reason rather than this one.
 
+41. **`llama-cpp-2`'s real API differs from its published docs in two ways that
+    matter, and the verification gate is what caught them.** Checked against the
+    vendored 0.1.156 source, not docs.rs — for a pinned version that is the code
+    that will actually compile.
+
+    First, `LlamaBackend::init()` is guarded by a process-wide `AtomicBool` and
+    returns `BackendAlreadyInitialized` on a second call while one is alive
+    (`Drop` resets it). So the **backend must be a process-wide singleton and
+    the *model* is what loads and unloads** — which is the right split anyway,
+    since `llama_backend_init` costs nothing while the weights are the
+    multi-gigabyte part §2 cares about. A `ModelManager` that owned a backend
+    could not be constructed twice, which would break tests before it broke
+    anything else.
+
+    Second, `LlamaSampler::sample` takes `&mut self`; the published example
+    shows it called on an immutable binding. Also `LlamaContext<'a>` borrows the
+    model, so the two cannot be stored in one struct — the context has to be
+    built inside each generate call, which suits load/generate/unload exactly.
+
+    Pinned with `=0.1.156` rather than caret. It is a 0.x crate, so caret would
+    accept every 0.1.x, and those track upstream llama.cpp's own C API. An FFI
+    crate whose patch bumps can carry an upstream API change is not one to
+    float.
+
+42. **`ModelManager` has a trait seam, and its unload is unconditional.**
+    `TextGenerator`/`ModelLoader` exist so §3's policy — "load only on a
+    classified question, unload immediately after, never resident" — is testable
+    without a multi-gigabyte model. Every invariant in that file is about *when*
+    the model is loaded and dropped, not about what it generates, so a fake
+    generator tests all of them: `every_question_loads_again_because_this_is_not_a_cache`
+    is the one that fails loudly if someone later "optimizes" it into a cache.
+
+    The unload happens *before* the result is propagated, not after, so a failed
+    generation still unloads. That early-return is the one mistake that would
+    silently defeat §2's premise — gigabytes left resident precisely when
+    something already went wrong — so
+    `a_failed_generation_still_unloads` guards it rather than review.
+
+    `std::sync::Mutex`, not `tokio`'s: generation is a long CPU burn, and
+    callers in Phase 6 must wrap it in `spawn_blocking`. A `tokio::sync::Mutex`
+    would invite holding it across an `.await` on an executor thread, which is
+    the shape this is meant to prevent.
+
+43. **§11's deferred top-N cap is resolved as a token budget, not a count**
+    (`CONTEXT_TOKEN_BUDGET = 2400`), chosen by the user when asked. Blurts range
+    from four words to several hundred, so any fixed N is either wasteful on
+    short ones or over-long on a handful of real notes — and llama.cpp truncates
+    an over-long prompt *without reporting it*, degrading answers in a way
+    nothing in the app could observe. A budget cannot do that. Spent against an
+    estimate of 1.4 tokens per English word, since the model is not loaded when
+    the prompt is built and loading it to count tokens would invert Sleep-Mode's
+    whole lifecycle. Erring high is the safe direction.
+
+    Selection stops at the first result that does not fit rather than skipping
+    it for a smaller one behind it: §4 established the ranking and length is not
+    a relevance signal.
+
+44. **There is deliberately no all-in-one `answer_question`.** Retrieval is
+    async (LanceDB); generation is a long CPU burn behind a blocking mutex. One
+    function spanning both would either stall the async executor for the length
+    of an inference or force `tokio` into this crate's runtime dependencies
+    purely to work around itself. So `synthesis::answer_from_sources` takes
+    already-ranked results, and Phase 6 composes it with `hybrid_search` and
+    `spawn_blocking` explicitly — the composition is written out in
+    `synthesis.rs`'s module docs. This deviates from the roadmap, which asked
+    for `answer_question`; shipping the convenience would have shipped a
+    footgun. It also keeps the expensive half testable without a model, the same
+    way `search::rank` is.
+
+45. **`AnswerLabel` is an identifier, not display copy.** §11 assigns the exact
+    wording of the "AI summary" label to Module 6, so putting the English string
+    in a Rust crate would both contradict that and hardcode UI copy below the
+    IPC boundary. But `CLAUDE.md`'s "transparency without interruption" requires
+    generated content to be *marked* as generated, and a marker that crosses IPC
+    as structured data is one the frontend must handle rather than one it might
+    forget. So the enum carries `AiSummary` and Module 6 maps it to whatever it
+    renders.
+
+46. **An empty result set is its own variant, not an empty answer.**
+    `SleepModeOutcome::NothingFound { window }` rather than a `SleepModeAnswer`
+    with an empty string. §8 makes the empty state a different screen — paired
+    with the widen-the-window action — and an empty answer string would invite
+    Module 6 to render a blank summary card, which reads as "your notes say
+    nothing" rather than "nothing matched". The window that came up empty
+    travels with it so the UI can say what was searched and offer the next rung
+    of §5's ladder. **The model is never loaded on this path**: there would be
+    nothing to ground an answer in, and that is the exact setup for inventing a
+    memory the user will read as their own.
+
+47. **Prompt timestamps are relative ("3 days ago"), not calendar dates.**
+    Avoids both a date-formatting dependency and a question the schema cannot
+    answer: it stores UTC milliseconds, and rendering a local civil date needs
+    an offset this crate has no business knowing. Relative age is also the form
+    a recall question is usually asked in. A future timestamp reads as "today"
+    rather than a negative day count, for the same Module 5 clock-skew reason as
+    decision #35.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -544,6 +664,22 @@ one.
   `cargo fmt -p <crate>` reformats existing untouched files and buries a real
   diff in noise. Match the surrounding style by hand instead. (`cargo fmt --
   --check` is still useful for *reading* what it would object to.)
+
+- **`llama-cpp-2` needs CMake, a C++ toolchain, and libclang.** `llama-cpp-sys-2`
+  runs `bindgen` (a non-optional build dependency), which will not run without
+  libclang, and builds llama.cpp itself through CMake. CMake 3.29.2 and ninja
+  were already present; **LLVM was not** and was installed 2026-09-10 via
+  `winget install --id LLVM.LLVM` (22.1.8, to `C:\Program Files\LLVM`). As with
+  `protoc`, winget only updates `PATH` for shells started afterwards, and
+  bindgen looks for `LIBCLANG_PATH` rather than `PATH` anyway. From Git Bash:
+
+  ```bash
+  export LIBCLANG_PATH="C:\\Program Files\\LLVM\\bin"
+  ```
+
+  Expect the first build to be long — it compiles llama.cpp from source — and
+  every subsequent link of the `blurt-rag` test binary to be noticeably slower
+  than before, since llama.cpp is statically linked into it.
 
 - **Piping `cargo` into `tail`/`head` hides its exit code.** `cargo build | tail
   -40` reports *tail's* status, so a failed build looks like a success — this
@@ -616,6 +752,31 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-10 (session 4, continued x2)
+- Cleared the roadmap's **highest-risk item**: `llama-cpp-2` is added, pinned at
+  `=0.1.156`, and **compiles on this machine**. Required installing LLVM for
+  libclang (`llama-cpp-sys-2` runs bindgen) — see Environment.
+- Read its API from the vendored source rather than docs.rs, which caught two
+  differences that shape the implementation (decision #41): `LlamaBackend::init`
+  is a process-wide singleton, and `LlamaSampler::sample` takes `&mut self`
+  where the published example shows it on an immutable binding. **Nothing
+  references the crate yet** — the loader impl is the next task.
+- Built **`model_manager.rs`** (§3's load/unload service, decision #42) and
+  **`synthesis.rs`** (grounded prompt, §8 answer shape, decisions #43-#47),
+  TDD throughout with Red confirmed against `todo!()` first.
+- **Asked rather than assumed** on §11's deferred top-N cap; the user chose a
+  token budget over a fixed count, which is also the only option that cannot be
+  silently truncated by llama.cpp.
+- Deviated from the roadmap once, deliberately: no all-in-one `answer_question`
+  (decision #44). Retrieval is async and generation is a blocking CPU burn, so
+  the convenience would have been a footgun.
+- Decisions #41-#47 recorded; two environment notes added.
+- **317 tests green** (104 + 65 + 118 + 30), 8 `#[ignore]`d, verified in a full
+  `cargo test --workspace` run on 2026-09-11 after the previous session's run
+  was killed mid-build. `cargo clippy` was **not** rerun this round: adding
+  `llama-cpp-2` shifted shared dependencies and a clippy pass would mean a
+  second full rebuild of the LanceDB/DataFusion stack. Run it first next session.
 
 ### 2026-09-10 (session 4, continued)
 - Started Phase 5: **`classify.rs`**, §9's statement-vs-question split. Pure
