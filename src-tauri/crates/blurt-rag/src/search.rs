@@ -242,7 +242,7 @@ pub struct SearchResult {
 /// thin wrapper that produces the hits. Keeping the split here is what lets
 /// ranking, deduplication, windowing and scoping be tested without loading
 /// ~100MB of model to assert that an old note sorts after a new one.
-pub(crate) fn rank(
+pub fn rank(
     conn: &Connection,
     matches: &[VectorMatch],
     query: &str,
@@ -385,6 +385,27 @@ pub async fn hybrid_search(
     query: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchResult>> {
+    let matches = retrieve_matches(store, embedder, query, options).await?;
+    rank(conn, &matches, query, options, now_ms())
+}
+
+/// The async half of a query: the vector hits, before any ranking.
+///
+/// Split out from [`hybrid_search`] because of a constraint that only shows up
+/// at the IPC boundary. A Tauri async command's future must be `Send`, and a
+/// `rusqlite::Connection` is not `Sync` — so a caller cannot hold the database
+/// guard across the `.await` on the vector store. Exposing the async half and
+/// the synchronous [`rank`] separately lets `blurt-app` await this first, then
+/// take the database lock afterwards, and never hold one across the other.
+///
+/// [`hybrid_search`] remains the composition of the two for callers with a
+/// connection already in hand, which is every test in this crate.
+pub async fn retrieve_matches(
+    store: &VectorStore,
+    embedder: &mut Embedder,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<VectorMatch>> {
     // Both of these decide the answer before the model is needed. Loading
     // ~100MB to embed nothing, or to rank a page of zero results, is pure cost.
     if query.trim().is_empty() || options.limit == 0 {
@@ -397,11 +418,9 @@ pub async fn hybrid_search(
     };
 
     let wanted = options.offset.saturating_add(options.limit);
-    let matches = store
+    store
         .search(query_vector, wanted.saturating_mul(VECTOR_OVERFETCH))
-        .await?;
-
-    rank(conn, &matches, query, options, now_ms())
+        .await
 }
 
 #[cfg(test)]
@@ -1145,6 +1164,35 @@ mod tests {
             !embedder.is_loaded(),
             "an empty query has nothing to embed; loading ~100MB to find that out is waste"
         );
+    }
+
+    #[tokio::test]
+    async fn retrieving_matches_short_circuits_before_the_model_just_as_the_whole_query_does() {
+        // The guards live in the extracted half now, so they need their own
+        // coverage: if they had been left behind in `hybrid_search`, a caller
+        // composing the two halves by hand would load the model for an empty
+        // query.
+        let dir = tempfile::tempdir().unwrap();
+        let store = vector_store(&dir).await;
+        let mut embedder = embedder();
+
+        assert!(
+            retrieve_matches(&store, &mut embedder, "   ", &SearchOptions::default())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(retrieve_matches(
+            &store,
+            &mut embedder,
+            "oranges",
+            &SearchOptions { limit: 0, ..SearchOptions::default() }
+        )
+        .await
+        .unwrap()
+        .is_empty());
+
+        assert!(!embedder.is_loaded(), "neither case has anything to embed");
     }
 
     #[tokio::test]

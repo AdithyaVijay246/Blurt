@@ -18,6 +18,11 @@ blurt-router = { workspace = true }
 blurt-rag = { workspace = true }
 blurt-sync = { workspace = true }
 
+# Module 4's handles are opened lazily behind an async mutex, and generation
+# leaves the runtime via spawn_blocking. A `std` guard is not `Send`, which a
+# Tauri async command's future must be.
+tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros"] }
+
 [dev-dependencies]
 # "test" feature gates the tauri::test mock-runtime module used by command tests.
 tauri = { workspace = true, features = ["test"] }

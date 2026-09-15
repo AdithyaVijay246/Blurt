@@ -30,50 +30,42 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** continue Phase 6 — **expose the domain crates over IPC.**
-The vault now works, so the app can create and open its database; what is still
-unreachable is everything that makes it useful. In roadmap order:
+**Next action:** finish Phase 6. Every domain crate is now reachable over IPC —
+capture, voice normalization, classification, search and ask all have commands —
+so what remains is two pieces of orchestration plus the model files.
 
-1. **`commands/router.rs`** — `capture_item_via_router` and
-   `capture_item_via_voice`. `blurt-router` has been finished and completely
-   unexposed since Module 3. It *decides* and never writes, so these commands
-   perform the resulting write via `blurt_schema::repository` and emit a Tauri
-   event for other open views (§3's event-driven pattern).
-2. **`commands/search.rs`** — `classify_input` as its own command (so §9's
-   statement/question split is explicit at the IPC layer rather than buried),
-   then `search` and `ask`.
-3. **`AppState` extension** — it currently holds only `db` and `keyring`. The
-   `ModelManager`, `VectorStore` and `Embedder` go alongside them, initialized
-   at unlock rather than `Option`-wrapped separately, since all three are
-   meaningless without a decrypted database.
-4. **The edit-debounce Tokio task**, which §3 puts in this crate, driving
-   `blurt_rag::indexing::index_item` once an edit settles.
+1. **The edit-debounce task.** §3 of `MODULE_01_ARCHITECTURE.md` puts it in this
+   crate: a Tokio task per active edit session that waits ~1-2s after typing
+   stops, then calls `blurt_rag::indexing::index_item`. Nothing indexes anything
+   today, so **search currently returns nothing on a real vault** — the plumbing
+   works, but no capture is ever embedded. This is the single highest-value
+   remaining item.
+2. **The sensitive-flip purge.** Marking an existing destination sensitive must
+   call `blurt_rag::indexing::remove_item` for its items. Retrieval already
+   refuses to surface such content (decision #36), so this reclaims space rather
+   than fixing a leak.
+3. **Bundle the two model files.** `rag_paths` already resolves them from
+   Tauri's bundled resources (decision #61) and tolerates their absence, so this
+   is obtaining the files and adding `bundle.resources` entries. Until then
+   `ask` fails at load time and the embedding model would download on first use
+   — both of which `BLUEPRINT.md` §2 forbids in the shipped app.
 
-Two carried-over items, unchanged: **compose Sleep-Mode explicitly** (decision
-#44 — `synthesis.rs`'s docs give the exact `hybrid_search` +
-`spawn_blocking(answer_from_sources)` shape), and **bundle the two model
-files** (decision #51 has the verified Tauri API; neither file ships yet, and
-`BLUEPRINT.md` §2 requires both). The sensitive-flip purge is also still
-unbuilt.
+After that, Phase 6 is done and the backend is complete. `tauri-specta` is worth
+revisiting at that point (decision #12), since Module 6 will consume the
+bindings.
 
-**Just finished:** the vault lifecycle — `commands/vault.rs` plus
-`blurt-schema`'s new `repository/secrets.rs`. `initialize_vault` creates all
-three keyslots (§5's master, recovery and sensitive), stores the recovery key
-inside the database for §D2 re-display, and returns it in the grouped form §B4
-displays; `unlock`/`lock`/`is_unlocked` are the app-level policy §5 describes.
-Decisions #52-#56, of which #53's write order is the one worth reading before
-touching that file.
+**Just finished:** the rest of the IPC surface — `commands/router.rs` and
+`commands/search.rs`.
 
-**Just finished:** Phase 5 is complete — `llama.rs`, the real llama.cpp backend.
-`LlamaLoader`/`LlamaGenerator` implement the same `ModelLoader`/`TextGenerator`
-traits the fakes do, so `ModelManager` drives a real GGUF with no change to the
-lifecycle logic. The backend is a process-wide `OnceLock` singleton; the model
-loads and unloads per question.
-
-Reading llama.cpp's own source rather than its examples corrected two things
-that would have failed at runtime — the sampling index and the deprecated
-detokenizer. See decision #48; the generation-loop note previously recorded at
-this resume point was wrong.
+- **Capture** resolves through `blurt-router` and writes the result, with every
+  branch ending in a row. An unresolved `@` chain saves to Unsorted and reports
+  what to create rather than creating it (decision #58).
+- **Voice** turned out to need a different shape than the roadmap sketched:
+  it normalizes and returns, because §4 has a review step the user must pass
+  through (decision #57 — a test caught this).
+- **Search and ask** required splitting `blurt-rag::search`, since a Tauri async
+  command cannot hold a `rusqlite` guard across an `.await` (decision #59).
+  Read that one before writing any further async command in this crate.
 
 ## Status by component
 
@@ -86,12 +78,12 @@ this resume point was wrong.
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
 | `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4; `repository/secrets.rs` for the `app_secrets` recovery key |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
-| `blurt-rag` (M4) | **Done, green** | All of `MODULE_04_EMBEDDINGS_RAG.md`: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`/`model_manager`/`synthesis`/`llama`. Real inference works; the GGUF is not bundled yet, so the ask path needs a model file before it runs end to end |
+| `blurt-rag` (M4) | **Done, green** | All of `MODULE_04_EMBEDDINGS_RAG.md`: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`/`model_manager`/`synthesis`/`llama`. Retrieval is exposed as an async `retrieve_matches` plus a synchronous `rank` so a Tauri command can call it (decision #59). Real inference works; the GGUF is not bundled yet, so the ask path needs a model file before it runs end to end |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
-| `blurt-app` | **Partial, green** | Vault lifecycle (`initialize_vault`/`unlock`/`lock`/`is_unlocked`) plus the destinations/items/edits CRUD slice. **The app can now create and open its own database.** Still unexposed: `blurt-router` and all of `blurt-rag` — no capture-via-router, search, classify or ask commands yet, and no edit-debounce task |
+| `blurt-app` | **Partial, green** | Vault lifecycle, CRUD slice, **capture via router**, **voice normalization**, **`classify_input`/`search`/`ask`**. Every domain crate is now reachable over IPC. Missing: the edit-debounce task and the sensitive-flip purge |
 
-**338 tests green** across the workspace as of the last commit (109
-`blurt-schema` + 65 `blurt-router` + 123 `blurt-rag` + 41 `blurt-app`), plus 10
+**360 tests green** across the workspace as of the last commit (109
+`blurt-schema` + 65 `blurt-router` + 124 `blurt-rag` + 62 `blurt-app`), plus 10
 `#[ignore]`d, which split into two groups with **different levels of proof**.
 Eight need the real ~100MB embedding model and were last run and confirmed green
 on 2026-09-10. The two added on 2026-09-15 need a real GGUF via
@@ -701,6 +693,76 @@ one.
     app-level unlock. `lock` is the mechanism it will call; owning the timer is
     Module 6's job.
 
+57. **Voice is a normalize-only command; it does not capture.** The roadmap
+    sketched `capture_item_via_voice(state, transcript)` as "normalize, then
+    delegate to the same path", and that is wrong. §4 puts a **review step**
+    between transcription and capture: every standalone "at" is highlighted and
+    swapped to `@`, the user dismisses any that were not routing (§4.2), and
+    only what survives gets resolved. Normalizing and capturing in one call
+    deletes that step.
+
+    It matters because §4 accepts a real false-positive rate to get there —
+    "meet Alex at 9pm" *will* be flagged, which the doc calls "a known, accepted
+    tradeoff... a one-time per-sentence dismissal cost, judged cheaper than
+    silently mis-routing". A combined command produces exactly the silent
+    mis-routing that tradeoff was made to avoid, and voice has no picker to
+    correct it after the fact.
+
+    So `normalize_voice_transcript` returns the rewritten text plus each
+    replacement's **original substring verbatim**, which is what lets a
+    dismissal restore capitalisation and spacing exactly. The reviewed text then
+    goes to `capture_item_via_router` like any typed input — §4's "voice adds
+    zero new parsing logic", honoured literally. A test caught this by failing.
+
+58. **An unresolved `@` chain saves to Unsorted and reports what to create; it
+    never creates the destination.** Both of the other options break a stated
+    rule. Refusing the capture breaks "capture is never blocked"; silently
+    creating breaks §2.5, where the `+` is a **tap in the live picker** that
+    happens before submit — so by the time text reaches the command, an
+    unresolved segment means the picker did *not* resolve it, and creating
+    would turn a typo into a permanent list. The item lands in Unsorted (a real
+    destination, per "nothing is ever unrouted") and
+    `CaptureOutcomeDto::NeedsDestination` carries the parent, name, trigger and
+    remaining segments so the UI can offer creation followed by an ordinary
+    move.
+
+    A chain with no body ("@weekly" alone) is refused with `EmptyCapture`
+    rather than filed as an empty item. `blurt-router` explicitly leaves that
+    call to the caller.
+
+59. **`blurt-rag::search` is split into an async `retrieve_matches` and a public
+    synchronous `rank`, because of a constraint that only appears at the IPC
+    boundary.** A Tauri async command's future must be `Send`, and
+    `rusqlite::Connection` is not `Sync` — so the database guard cannot be alive
+    across the `.await` on the vector store. `hybrid_search` holds both at once
+    by construction and therefore cannot be called from a command at all.
+
+    Both async commands now await the vector half first (which takes no
+    connection), then take the database lock and rank synchronously, and never
+    hold one across the other. `hybrid_search` remains as the composition for
+    callers that already have a connection, which is every test in that crate.
+    Worth remembering as a general shape: an API that takes a `Connection` *and*
+    is `async` cannot be used from a Tauri command.
+
+60. **`RagResources` are opened lazily behind a `tokio` mutex and handed out as
+    an `Arc`.** Lazily because `VectorStore::open` is `async` while `unlock` is
+    not, and making unlock async would have rippled through every vault test for
+    no benefit. Behind an `Arc` because both callers need to *stop* holding the
+    state lock before they continue — `search` to `.await`, and `ask` to
+    `spawn_blocking` — and an `Arc` is what lets the handles outlive the guard.
+    The embedder sits behind its own `tokio::sync::Mutex` for the same
+    `Send`-across-`.await` reason as #59.
+
+61. **The two model files resolve from bundled resources; the vector store lives
+    in the data directory.** Different roots on purpose: the models ship with
+    the app and are read-only (`BLUEPRINT.md` §2), while LanceDB is derived data
+    that is rebuilt if lost and must be writable.
+
+    Resolving a resource path does **not** require the file to exist, and
+    neither model is bundled yet. That is deliberate and load-bearing right now:
+    capture and plain-search keep working, and only `ask` fails, as a
+    `ModelLoad` error at the moment of loading rather than at startup.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -841,6 +903,24 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-15 (session 5, continued x2)
+- **The whole IPC surface landed.** `commands/router.rs` (capture + voice
+  normalization) and `commands/search.rs` (`classify_input`, `search`, `ask`),
+  plus the `AppState` extension holding Module 4's handles. Every domain crate
+  is now reachable from the frontend.
+- **Two designs changed because the docs said so, not because the code
+  complained.** Reading §4 showed voice needs a review step, so
+  `capture_item_via_voice` became `normalize_voice_transcript` (decision #57);
+  reading §2.5 showed the `+` create is a picker tap, so an unresolved chain
+  saves to Unsorted and reports rather than creating (decision #58).
+- **One design changed because the compiler would have said so**: a Tauri async
+  command's future must be `Send` and `rusqlite::Connection` is not `Sync`, so
+  `hybrid_search` — async *and* taking a connection — cannot be called from a
+  command at all. Split into `retrieve_matches` + public `rank` (decision #59).
+- **360 tests green** (109 + 65 + 124 + 62), 10 `#[ignore]`d.
+- **Known and important:** nothing indexes yet, so search returns nothing on a
+  real vault. The debounce task is the next thing to build.
 
 ### 2026-09-15 (session 5, continued)
 - **Phase 6 started: the vault lifecycle.** `blurt-app` gained

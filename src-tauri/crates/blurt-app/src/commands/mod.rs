@@ -4,6 +4,8 @@
 pub mod destinations;
 pub mod edits;
 pub mod items;
+pub mod router;
+pub mod search;
 pub mod vault;
 
 use uuid::Uuid;

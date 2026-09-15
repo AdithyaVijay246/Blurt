@@ -34,7 +34,7 @@ use blurt_schema::repository::secrets;
 use blurt_schema::{Database, Keyring, MasterKey, RecoveryKey};
 
 use crate::error::{CommandError, CommandResult};
-use crate::state::AppState;
+use crate::state::{AppState, RagPaths};
 
 /// Wrapped key blobs. Not secret on its own — see the module docs.
 const KEYRING_FILE: &str = "keyring.json";
@@ -144,6 +144,33 @@ fn app_data_dir(app: &tauri::AppHandle) -> CommandResult<PathBuf> {
     app.path()
         .app_data_dir()
         .map_err(|e| CommandError::Io(format!("no app data directory: {e}")))
+}
+
+/// Where Module 4's files live for this install.
+///
+/// Two different roots, deliberately. The vector store is derived data that is
+/// rebuilt if lost, so it sits beside the database in the writable data
+/// directory. The two model files ship *with the app* and are read-only, so
+/// they come from Tauri's bundled resources (PROGRESS.md decision #51) —
+/// `BLUEPRINT.md` §2 requires them bundled rather than downloaded.
+///
+/// Resolving a resource path does not require the file to exist; neither model
+/// is bundled yet, so both currently point at paths that are absent. That
+/// surfaces as a load error at ask time rather than a failure here, which is
+/// what keeps search and capture working in the meantime.
+pub(crate) fn rag_paths(app: &tauri::AppHandle) -> CommandResult<RagPaths> {
+    let data = app_data_dir(app)?;
+    let resource = |relative: &str| {
+        app.path()
+            .resolve(relative, tauri::path::BaseDirectory::Resource)
+            .map_err(|e| CommandError::Io(format!("cannot resolve bundled {relative}: {e}")))
+    };
+
+    Ok(RagPaths {
+        vectors: data.join("vectors"),
+        embedding_cache: resource("models/embedding")?,
+        gguf: resource("models/generative.gguf")?,
+    })
 }
 
 #[tauri::command]

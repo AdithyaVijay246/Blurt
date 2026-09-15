@@ -48,7 +48,7 @@ mod tests {
     fn unlocked_state() -> AppState {
         let db = Database::open_in_memory(&MasterKey::generate()).unwrap();
         migrations::run(db.conn()).unwrap();
-        AppState { db: Mutex::new(Some(db)), keyring: Mutex::new(None) }
+        AppState { db: Mutex::new(Some(db)), ..Default::default() }
     }
 
     fn an_item(state: &AppState) -> String {

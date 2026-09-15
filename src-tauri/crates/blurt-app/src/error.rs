@@ -34,6 +34,12 @@ pub enum CommandError {
     #[error("{0}")]
     Io(String),
 
+    /// The capture had a routing chain but no body ("@weekly" alone). A
+    /// gesture, not something to file — `blurt-router` leaves this call to the
+    /// caller by design.
+    #[error("nothing to capture")]
+    EmptyCapture,
+
     #[error("{0}")]
     Schema(String),
 }
@@ -45,6 +51,16 @@ impl From<blurt_schema::SchemaError> for CommandError {
             // passphrase" without string-matching on an error message.
             blurt_schema::SchemaError::WrongSecret => CommandError::WrongSecret,
             other => CommandError::Schema(other.to_string()),
+        }
+    }
+}
+
+impl From<blurt_router::RouterError> for CommandError {
+    fn from(err: blurt_router::RouterError) -> Self {
+        match err {
+            // Delegated rather than stringified, so the `WrongSecret` mapping
+            // above still applies to anything routing surfaces from storage.
+            blurt_router::RouterError::Schema(e) => e.into(),
         }
     }
 }
