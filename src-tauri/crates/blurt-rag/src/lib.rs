@@ -16,6 +16,7 @@ pub mod embedding;
 pub mod error;
 pub mod indexing;
 pub mod keywords;
+pub mod llama;
 pub mod model_manager;
 pub mod search;
 pub mod synthesis;
