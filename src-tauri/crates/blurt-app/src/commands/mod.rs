@@ -4,6 +4,7 @@
 pub mod destinations;
 pub mod edits;
 pub mod items;
+pub mod vault;
 
 use uuid::Uuid;
 

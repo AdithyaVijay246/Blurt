@@ -19,6 +19,10 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
+            commands::vault::initialize_vault,
+            commands::vault::unlock,
+            commands::vault::lock,
+            commands::vault::is_unlocked,
             commands::destinations::create_destination,
             commands::destinations::get_destination_path,
             commands::destinations::rename_destination,

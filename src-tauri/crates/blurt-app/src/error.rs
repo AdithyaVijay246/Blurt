@@ -14,13 +14,38 @@ pub enum CommandError {
     #[error("invalid id: {0}")]
     InvalidId(String),
 
+    /// No vault exists yet. Distinct from a wrong passphrase because the
+    /// frontend shows a different screen: onboarding, not the unlock screen.
+    #[error("vault has not been set up")]
+    NotInitialized,
+
+    /// A vault already exists. Re-initializing would generate a new master key
+    /// and orphan everything encrypted under the old one.
+    #[error("vault already exists")]
+    AlreadyInitialized,
+
+    /// The passphrase or recovery key did not unwrap a slot. Carries no detail
+    /// on purpose — the same reasoning as `SchemaError::WrongSecret`, which is
+    /// not an oracle.
+    #[error("incorrect passphrase")]
+    WrongSecret,
+
+    /// A filesystem or platform-path failure.
+    #[error("{0}")]
+    Io(String),
+
     #[error("{0}")]
     Schema(String),
 }
 
 impl From<blurt_schema::SchemaError> for CommandError {
     fn from(err: blurt_schema::SchemaError) -> Self {
-        CommandError::Schema(err.to_string())
+        match err {
+            // Mapped to its own variant so the unlock screen can say "wrong
+            // passphrase" without string-matching on an error message.
+            blurt_schema::SchemaError::WrongSecret => CommandError::WrongSecret,
+            other => CommandError::Schema(other.to_string()),
+        }
     }
 }
 

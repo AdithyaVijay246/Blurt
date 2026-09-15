@@ -30,35 +30,39 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** **Phase 6 — the final `blurt-app` wiring.** Module 4 is now
-complete in `blurt-rag`; what is missing is that none of it is reachable over
-IPC. `blurt-router` has been finished and unexposed since Module 3, and there is
-still **no `unlock` command**, so the app cannot even open its database. That is
-the gap to close.
+**Next action:** continue Phase 6 — **expose the domain crates over IPC.**
+The vault now works, so the app can create and open its database; what is still
+unreachable is everything that makes it useful. In roadmap order:
 
-Phase 6's shape, per the roadmap: `commands/router.rs` (capture via router and
-via voice), `commands/search.rs` (`search`, `classify_input`, `ask`), an
-extended `AppState` holding the `ModelManager`, `VectorStore` and `Embedder`
-alongside the database, and the Tokio debounce task that drives
-`indexing::index_item` after an edit settles.
+1. **`commands/router.rs`** — `capture_item_via_router` and
+   `capture_item_via_voice`. `blurt-router` has been finished and completely
+   unexposed since Module 3. It *decides* and never writes, so these commands
+   perform the resulting write via `blurt_schema::repository` and emit a Tauri
+   event for other open views (§3's event-driven pattern).
+2. **`commands/search.rs`** — `classify_input` as its own command (so §9's
+   statement/question split is explicit at the IPC layer rather than buried),
+   then `search` and `ask`.
+3. **`AppState` extension** — it currently holds only `db` and `keyring`. The
+   `ModelManager`, `VectorStore` and `Embedder` go alongside them, initialized
+   at unlock rather than `Option`-wrapped separately, since all three are
+   meaningless without a decrypted database.
+4. **The edit-debounce Tokio task**, which §3 puts in this crate, driving
+   `blurt_rag::indexing::index_item` once an edit settles.
 
-Three things to carry into it:
+Two carried-over items, unchanged: **compose Sleep-Mode explicitly** (decision
+#44 — `synthesis.rs`'s docs give the exact `hybrid_search` +
+`spawn_blocking(answer_from_sources)` shape), and **bundle the two model
+files** (decision #51 has the verified Tauri API; neither file ships yet, and
+`BLUEPRINT.md` §2 requires both). The sensitive-flip purge is also still
+unbuilt.
 
-1. **Compose Sleep-Mode explicitly** — there is no all-in-one `answer_question`,
-   deliberately (decision #44). Retrieval is `async`; generation is a blocking
-   CPU burn behind a mutex. `synthesis.rs`'s module docs give the exact
-   `hybrid_search` + `spawn_blocking(answer_from_sources)` composition to use.
-2. **Bundle the two model files.** Tauri's API is now verified (decision #51):
-   `bundle.resources` in `tauri.conf.json`, resolved at runtime with
-   `app.path().resolve(.., BaseDirectory::Resource)`. Both `LlamaLoader::new`
-   and `Embedder::new` already take a path, so this is wiring, not redesign.
-   **Neither file is actually bundled yet** — the Qwen2.5-3B GGUF still has to be
-   obtained, and `fastembed` still downloads on first load (decision #29).
-   `BLUEPRINT.md` §2 requires both to ship with the app.
-3. **The sensitive-flip purge** is still unbuilt: marking an existing
-   destination sensitive must call `blurt_rag::indexing::remove_item` for its
-   items. Retrieval already refuses to surface such content (decision #36), so
-   this is about reclaiming space rather than correctness.
+**Just finished:** the vault lifecycle — `commands/vault.rs` plus
+`blurt-schema`'s new `repository/secrets.rs`. `initialize_vault` creates all
+three keyslots (§5's master, recovery and sensitive), stores the recovery key
+inside the database for §D2 re-display, and returns it in the grouped form §B4
+displays; `unlock`/`lock`/`is_unlocked` are the app-level policy §5 describes.
+Decisions #52-#56, of which #53's write order is the one worth reading before
+touching that file.
 
 **Just finished:** Phase 5 is complete — `llama.rs`, the real llama.cpp backend.
 `LlamaLoader`/`LlamaGenerator` implement the same `ModelLoader`/`TextGenerator`
@@ -80,14 +84,14 @@ this resume point was wrong.
 | `blurt-schema` — keyring | **Done, green** | Key-wrapping, 3 slot kinds, recovery-key encoding |
 | `blurt-schema` — DDL | **Done, green** | `migrations/0001_initial.sql`, all §2 tables + indexes + seeds |
 | `blurt-schema` — db/migrations | **Done, green** | SQLCipher raw-key open + probe; `user_version` runner |
-| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4 |
+| `blurt-schema` — repository/CRUD | **Done, green** | `repository/{destinations,items,edits,embeddings,keywords,indexing}.rs`; `list_children`/`list_all` + seed ids for M3, `is_item_indexable`/`store_index_results`/`edits::get_by_id` for M4; `repository/secrets.rs` for the `app_secrets` recovery key |
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
 | `blurt-rag` (M4) | **Done, green** | All of `MODULE_04_EMBEDDINGS_RAG.md`: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`/`model_manager`/`synthesis`/`llama`. Real inference works; the GGUF is not bundled yet, so the ask path needs a model file before it runs end to end |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
-| `blurt-app` | **Partial, green** | Representative command slice over destinations/items/edits (§1 CRUD). No unlock command, and no router commands yet — `blurt-router` is finished but not yet reachable over IPC (Phase 6) |
+| `blurt-app` | **Partial, green** | Vault lifecycle (`initialize_vault`/`unlock`/`lock`/`is_unlocked`) plus the destinations/items/edits CRUD slice. **The app can now create and open its own database.** Still unexposed: `blurt-router` and all of `blurt-rag` — no capture-via-router, search, classify or ask commands yet, and no edit-debounce task |
 
-**322 tests green** across the workspace as of the last commit (104
-`blurt-schema` + 65 `blurt-router` + 123 `blurt-rag` + 30 `blurt-app`), plus 10
+**338 tests green** across the workspace as of the last commit (109
+`blurt-schema` + 65 `blurt-router` + 123 `blurt-rag` + 41 `blurt-app`), plus 10
 `#[ignore]`d, which split into two groups with **different levels of proof**.
 Eight need the real ~100MB embedding model and were last run and confirmed green
 on 2026-09-10. The two added on 2026-09-15 need a real GGUF via
@@ -640,6 +644,63 @@ one.
     the resolved path. Neither model file is actually bundled yet; that is
     Phase 6 work in `blurt-app`, which is where an `AppHandle` exists.
 
+52. **The recovery key is stored as its grouped display string, not raw bytes.**
+    `repository/secrets.rs` is the new `app_secrets` accessor decision #1 always
+    implied but never had. The grouped form is what `MODULE_06_UI_SHELL.md` §D2
+    re-displays and what §B4 asks the user to verify two groups of, so storing
+    it that way means no formatting on read — and `RecoveryKey::parse` validates
+    on the way back, so a corrupted row surfaces as an error rather than a
+    silently wrong key. The write is an upsert because rotating the key replaces
+    the row, and `app_secrets.key` is a primary key that a plain insert would
+    collide with the second time.
+
+53. **`initialize_vault` writes the keyring *before* the database, and refuses
+    to run twice.** The order is the whole point and it is not arbitrary.
+    Interrupted after the keyring is saved, the next launch finds a vault whose
+    passphrase already works and whose database is simply created on first
+    unlock — recoverable. The reverse order would leave a database encrypted
+    under a master key that was never wrapped into any slot, which is
+    unrecoverable by construction, and unrecoverable in the specific way
+    `BLUEPRINT.md` §1 says nobody can help with.
+
+    Re-initializing an existing vault is refused outright
+    (`AlreadyInitialized`) rather than merged into: a second run generates a
+    *new* master key, which would orphan every byte already written under the
+    old one. Guarded by
+    `initializing_twice_is_refused_rather_than_clobbering_the_vault`.
+
+54. **`CommandError` distinguishes "no vault yet" from "wrong passphrase".**
+    New variants `NotInitialized`, `AlreadyInitialized`, `WrongSecret` and
+    `Io`, and `SchemaError::WrongSecret` now maps to `CommandError::WrongSecret`
+    rather than being flattened into `Schema(String)`. §B6's unlock screen and
+    §E's onboarding are different screens, and the frontend has to pick between
+    them — doing that by matching on an error *message* would break the moment
+    anyone reworded it. `WrongSecret` still carries no detail, keeping
+    `SchemaError::WrongSecret`'s "don't hand back an oracle" property.
+
+55. **Migrations run on unlock, not only at creation.** A build that ships a new
+    migration has to apply it to the vault that already exists, and unlock is
+    the first moment a master key is available to open the file at all. Putting
+    it only in `initialize_vault` would mean existing installs silently never
+    upgrade their schema.
+
+56. **The sensitive keyslot is created at setup, and nothing checks it yet.**
+    §5 describes two deliberately different policies: app-level unlock, which
+    may use a grace period, and sensitive-destination access, which requires a
+    fresh uncached check *every time* and can never be satisfied by unlock
+    state. `initialize_vault` creates the `Sensitive` slot so that gate has
+    something to verify against later, but `unlock` deliberately **refuses** the
+    sensitive passphrase — guarded by
+    `the_sensitive_passphrase_is_a_separate_slot_that_does_not_unlock_the_app`,
+    which exists so the two policies cannot quietly collapse into one. The
+    passphrase may legitimately be the *same string* as the master one (§5
+    leaves that to the user); each slot has its own salt, so reuse is not
+    detectable from the keyring file.
+
+    Also still absent, and deliberately: the idle timer that §5 says expires
+    app-level unlock. `lock` is the mechanism it will call; owning the timer is
+    Module 6's job.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -780,6 +841,22 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-15 (session 5, continued)
+- **Phase 6 started: the vault lifecycle.** `blurt-app` gained
+  `commands/vault.rs` (`initialize_vault`/`unlock`/`lock`/`is_unlocked`) and
+  `blurt-schema` gained `repository/secrets.rs` for the `app_secrets` recovery
+  key that decision #1 always implied. TDD throughout, Red confirmed against
+  `todo!()` first. **The app can now create and open its own database** — until
+  now there was no way to do either.
+- Read `MODULE_02_SCHEMA.md` §3/§5 and `MODULE_06_UI_SHELL.md` §B4/§B6/§E before
+  writing, which is where the three-slot setup, the grouped recovery-key format
+  and the onboarding order came from rather than being invented.
+- Decisions #52-#56. The load-bearing one is **#53**: the keyring is saved
+  before the database, because the reverse order can produce a database
+  encrypted under a master key wrapped nowhere — unrecoverable by construction.
+- **338 tests green** (109 + 65 + 123 + 41), 10 `#[ignore]`d, clippy clean on
+  `blurt-app`. The two `blurt-schema` keyring warnings remain untouched.
 
 ### 2026-09-15 (session 5)
 - **Phase 5 is complete.** Added `llama.rs`: `LlamaLoader`/`LlamaGenerator`

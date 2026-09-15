@@ -12,6 +12,7 @@ pub mod embeddings;
 pub mod indexing;
 pub mod items;
 pub mod keywords;
+pub mod secrets;
 
 pub use destinations::{Destination, DestinationKind, RANDOM_THOUGHTS_ID, UNSORTED_ID};
 pub use edits::Edit;
