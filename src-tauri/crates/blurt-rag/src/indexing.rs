@@ -54,34 +54,51 @@ pub enum IndexOutcome {
     Skipped,
 }
 
-/// Indexes one version of one item's text.
+/// One version read and chunked under the connection, ready to embed.
 ///
-/// `edit_id` selects the version: `None` is the original capture, `Some(id)`
-/// that edit. Each version is embedded separately and none replaces another,
-/// per §3 — searching the old wording of an edited item still finds it.
-///
-/// **Not idempotent.** Calling it twice for the same version stores a second
-/// set of chunks. Search dedupes by item, so the user-visible effect is nil,
-/// but it wastes space — the scheduler in `blurt-app` owns not double-firing.
-pub async fn index_item(
-    conn: &Connection,
-    store: &VectorStore,
-    embedder: &mut Embedder,
-    item_id: Uuid,
-    edit_id: Option<Uuid>,
-) -> Result<IndexOutcome> {
-    if !is_item_indexable(conn, item_id)? {
-        return Ok(IndexOutcome::Skipped);
-    }
+/// Owns everything it needs and borrows nothing, which is the point: the
+/// embedding half that follows is `async` and must not hold a `Connection`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedIndex {
+    pub item_id: Uuid,
+    pub edit_id: Option<Uuid>,
+    text: String,
+    chunks: Vec<chunking::Chunk>,
+}
 
+/// One version embedded and written to LanceDB, waiting for its SQLCipher half.
+#[derive(Debug, Clone)]
+pub struct StagedIndex {
+    pub item_id: Uuid,
+    rows: Vec<Embedding>,
+    tags: Vec<String>,
+}
+
+/// The first, synchronous third of [`index_item`]: eligibility, then the text
+/// of the requested version, then its chunks. `None` means skip — the item is
+/// sensitive, tombstoned, in a tombstoned destination, or gone.
+pub fn prepare(conn: &Connection, item_id: Uuid, edit_id: Option<Uuid>) -> Result<Option<PreparedIndex>> {
+    if !is_item_indexable(conn, item_id)? {
+        return Ok(None);
+    }
     let text = match version_text(conn, item_id, edit_id)? {
         Some(text) => text,
-        None => return Ok(IndexOutcome::Skipped),
+        None => return Ok(None),
     };
-
     let chunks = chunking::chunk(&text);
+    Ok(Some(PreparedIndex { item_id, edit_id, text, chunks }))
+}
+
+/// The middle third: embeds and writes vectors. Takes no connection, so its
+/// future is `Send` and can run from a Tauri command or a spawned task.
+pub async fn embed_and_store(
+    store: &VectorStore,
+    embedder: &mut Embedder,
+    prepared: PreparedIndex,
+) -> Result<StagedIndex> {
+    let PreparedIndex { item_id, edit_id, text, chunks } = prepared;
     if chunks.is_empty() {
-        return Ok(IndexOutcome::Indexed { chunks: 0, keywords: 0 });
+        return Ok(StagedIndex { item_id, rows: Vec::new(), tags: Vec::new() });
     }
 
     let chunk_texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
@@ -118,13 +135,54 @@ pub async fn index_item(
     // Vectors first — see the module docs on write order.
     store.add(&records).await?;
 
-    let tags: Vec<String> = keywords::extract(&text).into_iter().map(|k| k.text).collect();
-    store_index_results(conn, item_id, &rows, &tags)?;
+    let tags = keywords::extract(&text).into_iter().map(|k| k.text).collect();
+    Ok(StagedIndex { item_id, rows, tags })
+}
 
+/// The last third: stores chunk rows and tags, after re-checking eligibility.
+pub fn commit(conn: &Connection, staged: StagedIndex) -> Result<IndexOutcome> {
+    if staged.rows.is_empty() {
+        return Ok(IndexOutcome::Indexed { chunks: 0, keywords: 0 });
+    }
+    // Eligibility again: embedding happened since `prepare` read it. If the
+    // item turned sensitive meanwhile, its vectors are left orphaned — nothing
+    // joins to them, and retrieval re-checks per candidate anyway (#36).
+    if !is_item_indexable(conn, staged.item_id)? {
+        return Ok(IndexOutcome::Skipped);
+    }
+    store_index_results(conn, staged.item_id, &staged.rows, &staged.tags)?;
     Ok(IndexOutcome::Indexed {
-        chunks: rows.len(),
-        keywords: tags.len(),
+        chunks: staged.rows.len(),
+        keywords: staged.tags.len(),
     })
+}
+
+/// Indexes one version of one item's text.
+///
+/// `edit_id` selects the version: `None` is the original capture, `Some(id)`
+/// that edit. Each version is embedded separately and none replaces another,
+/// per §3 — searching the old wording of an edited item still finds it.
+///
+/// **Not idempotent.** Calling it twice for the same version stores a second
+/// set of chunks. Search dedupes by item, so the user-visible effect is nil,
+/// but it wastes space — the scheduler in `blurt-app` owns not double-firing.
+///
+/// This is the composition of [`prepare`], [`embed_and_store`] and [`commit`],
+/// for callers that already hold a connection. It cannot be used from a Tauri
+/// command or a spawned task: it holds `conn` across an `.await`, and
+/// `Connection` is not `Sync`. Call the three halves instead (decision #59).
+pub async fn index_item(
+    conn: &Connection,
+    store: &VectorStore,
+    embedder: &mut Embedder,
+    item_id: Uuid,
+    edit_id: Option<Uuid>,
+) -> Result<IndexOutcome> {
+    let Some(prepared) = prepare(conn, item_id, edit_id)? else {
+        return Ok(IndexOutcome::Skipped);
+    };
+    let staged = embed_and_store(store, embedder, prepared).await?;
+    commit(conn, staged)
 }
 
 /// Removes everything indexed for an item, from both stores.
@@ -454,5 +512,85 @@ mod tests {
         let after = keyword_rows::list_for_item(db.conn(), item.id).unwrap();
 
         assert_ne!(before, after, "tags must follow the current wording");
+    }
+
+    #[test]
+    fn prepare_skips_a_sensitive_item() {
+        let db = migrated();
+        let secret = destination(&db, "Passwords", "pw", true);
+        let item = items::capture(db.conn(), secret, "gmail: hunter2").unwrap();
+
+        assert_eq!(prepare(db.conn(), item.id, None).unwrap(), None);
+    }
+
+    #[test]
+    fn prepare_reads_the_requested_version_not_the_current_text() {
+        let db = migrated();
+        let notes = destination(&db, "Notes", "notes", false);
+        let item = items::capture(db.conn(), notes, "milk").unwrap();
+        let first = edits::append(db.conn(), item.id, "oat milk").unwrap();
+        edits::append(db.conn(), item.id, "oat milk, 2 cartons").unwrap();
+
+        let prepared = prepare(db.conn(), item.id, Some(first.id)).unwrap().unwrap();
+
+        assert_eq!(prepared.edit_id, Some(first.id));
+        assert_eq!(prepared.text, "oat milk");
+        assert_eq!(prepared.chunks.len(), 1);
+    }
+
+    fn staged_by_hand(item_id: Uuid) -> StagedIndex {
+        StagedIndex {
+            item_id,
+            rows: vec![Embedding {
+                id: Uuid::new_v4(),
+                item_id,
+                edit_id: None,
+                vector_ref: Uuid::new_v4().to_string(),
+                chunk_index: 0,
+                chunk_start_offset: 0,
+                chunk_end_offset: 8,
+            }],
+            tags: vec!["oat milk".to_string()],
+        }
+    }
+
+    #[test]
+    fn commit_stores_rows_and_tags_for_a_still_eligible_item() {
+        let db = migrated();
+        let notes = destination(&db, "Notes", "notes", false);
+        let item = items::capture(db.conn(), notes, "oat milk").unwrap();
+
+        let outcome = commit(db.conn(), staged_by_hand(item.id)).unwrap();
+
+        assert_eq!(outcome, IndexOutcome::Indexed { chunks: 1, keywords: 1 });
+        assert_eq!(embeddings::list_for_item(db.conn(), item.id).unwrap().len(), 1);
+    }
+
+    /// The split widens the window between reading eligibility and writing —
+    /// embedding now happens in between — so commit asks again. Without this,
+    /// an item moved into a sensitive destination mid-pass would be indexed.
+    #[test]
+    fn commit_writes_nothing_for_an_item_that_became_sensitive_after_prepare() {
+        let db = migrated();
+        let notes = destination(&db, "Notes", "notes", false);
+        let item = items::capture(db.conn(), notes, "oat milk").unwrap();
+        let staged = staged_by_hand(item.id);
+
+        db.conn()
+            .execute("UPDATE destinations SET isSensitive = 1 WHERE id = ?1", [notes.to_string()])
+            .unwrap();
+
+        assert_eq!(commit(db.conn(), staged).unwrap(), IndexOutcome::Skipped);
+        assert!(embeddings::list_for_item(db.conn(), item.id).unwrap().is_empty());
+        assert!(keyword_rows::list_for_item(db.conn(), item.id).unwrap().is_empty());
+    }
+
+    /// Compile-time guard, never called: if `embed_and_store` ever starts
+    /// holding something `!Send` across an await, this stops compiling — which
+    /// is the regression that made the split necessary in the first place.
+    #[allow(dead_code)]
+    fn embed_and_store_is_send(store: &VectorStore, embedder: &mut Embedder, prepared: PreparedIndex) {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(embed_and_store(store, embedder, prepared));
     }
 }
