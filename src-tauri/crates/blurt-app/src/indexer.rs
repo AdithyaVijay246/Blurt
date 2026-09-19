@@ -30,6 +30,11 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+use blurt_rag::indexing::{self, IndexOutcome};
+
+use crate::error::{CommandError, CommandResult};
+use crate::state::{AppState, RagPaths};
+
 /// §3's "~1–2 seconds after the user stops typing", taken at the midpoint.
 pub const EDIT_QUIET_PERIOD: Duration = Duration::from_millis(1500);
 
@@ -151,6 +156,48 @@ fn apply(request: Request, ready: &mut VecDeque<IndexJob>, quiet: &mut HashMap<U
             quiet.clear();
         }
     }
+}
+
+/// Runs one job against the live vault.
+///
+/// Three phases, and the database lock is taken separately for the first and
+/// the last and never held across either `.await` (decision #59). The cheap
+/// eligibility read comes first, so a job for a sensitive or deleted item
+/// returns before LanceDB is even opened.
+///
+/// A locked vault is `Skipped`, not an error: a job queued just before a lock
+/// is ordinary, and the catch-up pass on the next unlock re-queues it.
+pub(crate) async fn run_job(state: &AppState, paths: &RagPaths, job: IndexJob) -> CommandResult<IndexOutcome> {
+    let prepared = {
+        let guard = state.db.lock().unwrap();
+        let Some(db) = guard.as_ref() else {
+            return Ok(IndexOutcome::Skipped);
+        };
+        indexing::prepare(db.conn(), job.item_id, job.edit_id).map_err(rag_error)?
+    };
+    let Some(prepared) = prepared else {
+        return Ok(IndexOutcome::Skipped);
+    };
+
+    let resources = crate::commands::search::rag_resources(state, paths).await?;
+    let staged = {
+        let mut embedder = resources.embedder.lock().await;
+        indexing::embed_and_store(&resources.store, &mut embedder, prepared)
+            .await
+            .map_err(rag_error)?
+    };
+
+    let guard = state.db.lock().unwrap();
+    let Some(db) = guard.as_ref() else {
+        // Locked mid-pass. The vectors just written are orphans nothing joins
+        // to; the catch-up pass re-queues the item on the next unlock.
+        return Ok(IndexOutcome::Skipped);
+    };
+    indexing::commit(db.conn(), staged).map_err(rag_error)
+}
+
+fn rag_error(e: blurt_rag::RagError) -> CommandError {
+    CommandError::Io(e.to_string())
 }
 
 #[cfg(test)]
@@ -287,5 +334,86 @@ mod tests {
         drop(handle);
 
         assert!(timeout(Duration::from_secs(1), task).await.is_ok());
+    }
+
+    use blurt_schema::repository::{destinations, embeddings, items};
+    use blurt_schema::{Database, MasterKey};
+
+    fn unlocked() -> AppState {
+        let db = Database::open_in_memory(&MasterKey::generate()).unwrap();
+        blurt_schema::migrations::run(db.conn()).unwrap();
+        let state = AppState::default();
+        *state.db.lock().unwrap() = Some(db);
+        state
+    }
+
+    /// The model paths need not exist for the non-ignored tests: none of them
+    /// reaches the embedder.
+    fn paths(dir: &tempfile::TempDir) -> RagPaths {
+        RagPaths {
+            vectors: dir.path().join("vectors"),
+            embedding_cache: std::env::temp_dir().join("blurt-test-fastembed-cache"),
+            gguf: dir.path().join("model.gguf"),
+        }
+    }
+
+    fn capture(state: &AppState, sensitive: bool) -> Uuid {
+        let guard = state.db.lock().unwrap();
+        let conn = guard.as_ref().unwrap().conn();
+        let dest = destinations::create(
+            conn, "Somewhere", &format!("t{}", Uuid::new_v4().simple()),
+            destinations::DestinationKind::List, None, false, sensitive, 0,
+        )
+        .unwrap();
+        items::capture(conn, dest.id, "oat milk and bread").unwrap().id
+    }
+
+    #[tokio::test]
+    async fn a_job_on_a_locked_vault_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+
+        let outcome = run_job(&state, &paths(&dir), job(Uuid::new_v4(), None)).await.unwrap();
+
+        assert_eq!(outcome, IndexOutcome::Skipped);
+        assert!(state.rag.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_sensitive_items_job_never_opens_the_vector_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = unlocked();
+        let secret = capture(&state, true);
+
+        let outcome = run_job(&state, &paths(&dir), job(secret, None)).await.unwrap();
+
+        assert_eq!(outcome, IndexOutcome::Skipped);
+        assert!(state.rag.lock().await.is_none(), "LanceDB was opened for a sensitive item");
+    }
+
+    #[tokio::test]
+    async fn a_job_for_an_item_that_no_longer_exists_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = unlocked();
+
+        let outcome = run_job(&state, &paths(&dir), job(Uuid::new_v4(), None)).await.unwrap();
+
+        assert_eq!(outcome, IndexOutcome::Skipped);
+    }
+
+    /// Loads the real embedding model (downloads it on first run). Run with
+    /// `cargo test -p blurt-app -- --ignored --test-threads=1`.
+    #[tokio::test]
+    #[ignore = "downloads and loads the ~100MB embedding model"]
+    async fn a_captured_item_is_embedded_once_its_job_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = unlocked();
+        let item = capture(&state, false);
+
+        let outcome = run_job(&state, &paths(&dir), job(item, None)).await.unwrap();
+
+        assert!(matches!(outcome, IndexOutcome::Indexed { chunks: 1, .. }), "{outcome:?}");
+        let guard = state.db.lock().unwrap();
+        assert_eq!(embeddings::list_for_item(guard.as_ref().unwrap().conn(), item).unwrap().len(), 1);
     }
 }

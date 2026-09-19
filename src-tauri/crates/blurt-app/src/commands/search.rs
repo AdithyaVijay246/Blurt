@@ -174,7 +174,7 @@ fn classify_input_impl(text: &str) -> InputKindDto {
 /// Lazy rather than created at unlock because `VectorStore::open` is `async`
 /// and unlock is not. The `Arc` is cloned out and the lock released before any
 /// caller awaits, so the state lock is never held across an `.await`.
-async fn rag_resources(state: &AppState, paths: &RagPaths) -> CommandResult<Arc<RagResources>> {
+pub(crate) async fn rag_resources(state: &AppState, paths: &RagPaths) -> CommandResult<Arc<RagResources>> {
     let mut guard = state.rag.lock().await;
     if let Some(existing) = guard.as_ref() {
         return Ok(Arc::clone(existing));
