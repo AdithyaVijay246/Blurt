@@ -18,7 +18,7 @@ tracks that.
 
 Remote: `https://github.com/AdithyaVijay246/Blurt`
 
-Last updated: 2026-09-15
+Last updated: 2026-09-19
 
 A roadmap through the rest of Module 3 (router) and Module 4 (embeddings/RAG)
 is saved at `C:\Users\adith\.claude\plans\dynamic-gliding-wolf.md` — Phases 1-5
@@ -30,42 +30,43 @@ rather than re-deriving the sequencing here.
 
 ## Resume here
 
-**Next action:** finish Phase 6. Every domain crate is now reachable over IPC —
-capture, voice normalization, classification, search and ask all have commands —
-so what remains is two pieces of orchestration plus the model files.
+**Next action:** finish Phase 6 — two items left.
 
-1. **The edit-debounce task.** §3 of `MODULE_01_ARCHITECTURE.md` puts it in this
-   crate: a Tokio task per active edit session that waits ~1-2s after typing
-   stops, then calls `blurt_rag::indexing::index_item`. Nothing indexes anything
-   today, so **search currently returns nothing on a real vault** — the plumbing
-   works, but no capture is ever embedded. This is the single highest-value
-   remaining item.
-2. **The sensitive-flip purge.** Marking an existing destination sensitive must
-   call `blurt_rag::indexing::remove_item` for its items. Retrieval already
-   refuses to surface such content (decision #36), so this reclaims space rather
-   than fixing a leak.
-3. **Bundle the two model files.** `rag_paths` already resolves them from
+1. **The sensitive-flip purge.** Marking an existing destination sensitive must
+   call `blurt_rag::indexing::remove_item` for its items. **There is no way to
+   flip the flag yet**: `isSensitive` is only ever set by `destinations::create`,
+   and neither `blurt-schema` nor `blurt-app` has a `set_sensitive`. So this
+   starts with that repository function and its command, and the purge hangs off
+   the command. Retrieval already refuses to surface such content (#36), so the
+   purge reclaims space rather than fixing a leak. Note `remove_item` is async
+   *and* takes a `Connection` — it needs the same split as `index_item` (#62)
+   before a command can call it.
+2. **Bundle the two model files.** `rag_paths` already resolves them from
    Tauri's bundled resources (decision #61) and tolerates their absence, so this
    is obtaining the files and adding `bundle.resources` entries. Until then
-   `ask` fails at load time and the embedding model would download on first use
-   — both of which `BLUEPRINT.md` §2 forbids in the shipped app.
+   `ask` fails at load time and **the embedding model downloads on first use** —
+   which now matters in practice, because captures are indexed (see below) and
+   an offline first capture fails to embed until the catch-up pass retries it.
 
 After that, Phase 6 is done and the backend is complete. `tauri-specta` is worth
 revisiting at that point (decision #12), since Module 6 will consume the
 bindings.
 
-**Just finished:** the rest of the IPC surface — `commands/router.rs` and
-`commands/search.rs`.
+**Open question for the user, raised 2026-09-19 and not yet answered:**
+`AppState.rag` is not cleared on lock, so after lock then unlock of a
+*different* vault, search, ask and the indexer reuse the previous vault's
+LanceDB handle. Pre-existing, not introduced by the indexer. Ask before fixing.
 
-- **Capture** resolves through `blurt-router` and writes the result, with every
-  branch ending in a row. An unresolved `@` chain saves to Unsorted and reports
-  what to create rather than creating it (decision #58).
-- **Voice** turned out to need a different shape than the roadmap sketched:
-  it normalizes and returns, because §4 has a review step the user must pass
-  through (decision #57 — a test caught this).
-- **Search and ask** required splitting `blurt-rag::search`, since a Tauri async
-  command cannot hold a `rusqlite` guard across an `.await` (decision #59).
-  Read that one before writing any further async command in this crate.
+**Just finished: background indexing** (plan:
+`C:\Users\adith\.claude\plans\blurt-background-indexer.md`). Captures and edits
+are now actually embedded, so **search returns results on a real vault** for
+the first time. Decisions #62–#65.
+
+- Captures are indexed immediately, edits after a 1.5s quiet period with a
+  newer edit replacing the waiting one, all through one serial worker in
+  `blurt-app/src/indexer.rs`.
+- Unlock re-queues anything whose latest version was never indexed.
+- The frontend gets an `item-indexed` event when a job embeds something.
 
 ## Status by component
 
@@ -80,7 +81,7 @@ bindings.
 | `blurt-router` (M3) | **Done, green** | `chain`/`candidates`/`nl`/`voice`/`resolve` — all of `MODULE_03_ROUTER.md`. Decides only; never writes |
 | `blurt-rag` (M4) | **Done, green** | All of `MODULE_04_EMBEDDINGS_RAG.md`: `chunking`/`embedding`/`keywords`/`vectorstore`/`indexing`/`search`/`classify`/`model_manager`/`synthesis`/`llama`. Retrieval is exposed as an async `retrieve_matches` plus a synchronous `rank` so a Tauri command can call it (decision #59). Real inference works; the GGUF is not bundled yet, so the ask path needs a model file before it runs end to end |
 | `blurt-sync` (M5) | **Empty stub** | Will add its own migration for `yrs` update logs + paired devices |
-| `blurt-app` | **Partial, green** | Vault lifecycle, CRUD slice, **capture via router**, **voice normalization**, **`classify_input`/`search`/`ask`**. Every domain crate is now reachable over IPC. Missing: the edit-debounce task and the sensitive-flip purge |
+| `blurt-app` | **Partial, green** | Vault lifecycle, CRUD slice, **capture via router**, **voice normalization**, **`classify_input`/`search`/`ask`**. Every domain crate is now reachable over IPC. **Background indexer** (capture, debounced edits, catch-up on unlock, `item-indexed` event). Missing: the sensitive-flip purge |
 
 **360 tests green** across the workspace as of the last commit (109
 `blurt-schema` + 65 `blurt-router` + 124 `blurt-rag` + 62 `blurt-app`), plus 10
@@ -763,6 +764,46 @@ one.
     capture and plain-search keep working, and only `ask` fails, as a
     `ModelLoad` error at the moment of loading rather than at startup.
 
+62. **`index_item` is split into `prepare` / `embed_and_store` / `commit`, and
+    `commit` re-checks eligibility.** Same constraint as #59: `index_item` is
+    async and holds a `Connection` across its await, so it could not run in the
+    background at all. `embed_and_store` takes no connection and a compile-time
+    guard in its tests keeps its future `Send`. `index_item` survives as the
+    composition, for callers that already hold a connection. The re-check in
+    `commit` exists because the split puts the whole embedding step between the
+    first eligibility read and the write — an item moved into a sensitive
+    destination in that window would otherwise be indexed. Its vectors are left
+    as orphans, which the write-order notes already treat as harmless.
+    `remove_item` has the same async-plus-`Connection` shape and will need the
+    same treatment before a command can call it.
+
+63. **One serial worker, 1500 ms quiet period, keyed by item.** §3 says edits
+    wait "~1–2 seconds"; 1500 ms is the midpoint and is a single constant,
+    `EDIT_QUIET_PERIOD`. A newer edit to the same item replaces the waiting job
+    and restarts the wait, which is how "only the settled version gets embedded"
+    is enforced. Everything runs through one task, one job at a time: the
+    debounce table needs no locks, and the non-idempotent `index_item` is never
+    run twice for one version. Captures run immediately and in order. The worker
+    is returned as a future rather than spawned, because `setup` must start it
+    on Tauri's runtime, where `tokio::spawn` would panic.
+
+64. **Catch-up on unlock, latest version only — chosen by the user
+    2026-09-19.** No design doc covers lost jobs. The queue is in memory, so a
+    quit, a crash, or an embedding model that fails to load (likely offline,
+    while the model is still downloaded on first use) would leave an item
+    unsearchable indefinitely. Unlock re-queues every indexable item whose latest
+    version has no embeddings (`pending_index_versions`). Older edit versions are
+    never backfilled: the debounce skips them on purpose, and from the database
+    they are indistinguishable from lost ones. Retry-with-backoff while running
+    was offered and declined — on a machine that cannot load the model it would
+    retry forever. Lock clears the queue.
+
+65. **A failed background job goes to stderr.** The command that queued it has
+    already returned, so there is no caller to report to, and the codebase has no
+    logging setup yet. `run_and_announce` is the one place a logger would slot
+    in. The failure is not lost for good: the next unlock's catch-up retries it.
+    A locked vault is `Skipped`, not an error.
+
 ## Environment / build gotchas
 
 - **Rust builds need Strawberry Perl ahead of MSYS Perl on `PATH`**, or
@@ -800,6 +841,11 @@ one.
   ```bash
   cargo test -p blurt-rag -- --ignored --test-threads=1
   ```
+
+  Expect **2 failures** in that run on this machine: the two llama tests
+  `panic!` on purpose when `BLURT_TEST_GGUF` is unset, rather than skipping,
+  and no GGUF exists here yet. Not a regression. Everything else in the run
+  should pass.
 
 - **This repo is not `rustfmt`-formatted; do not run `cargo fmt`.** The code is
   hand-formatted to a wider line budget than rustfmt's default, so
@@ -903,6 +949,24 @@ one.
 ## Session log
 
 Newest first. One short entry per session — what changed, not how.
+
+### 2026-09-19 (session 6)
+- **Background indexing landed; search now returns results on a real vault.**
+  Until today nothing was ever embedded. Planned first (plan file linked in
+  "Resume here"), then executed task by task, TDD throughout with Red confirmed
+  against `todo!()` before every implementation.
+- `blurt-schema`: `pending_index_versions`. `blurt-rag`: `index_item` split into
+  `prepare`/`embed_and_store`/`commit` (#62). `blurt-app`: `indexer.rs` — the
+  scheduler (#63), `run_job`, the `item-indexed` event — plus hooks in both
+  capture commands, `append_edit`, unlock (catch-up, #64) and lock.
+- **Asked rather than assumed** on the catch-up pass, which no doc specifies.
+- **384 tests green** (77 + 128 + 65 + 114), 11 `#[ignore]`d. The new ignored
+  end-to-end test passes against the real embedding model, as do the three
+  `index_item` model tests through the recomposed path. Clippy clean on
+  everything touched; the two known `blurt-schema` keyring warnings remain.
+  `npm run tauri dev` opens and stays up with the worker running.
+- Raised with the user, unanswered: `AppState.rag` survives a lock (see
+  "Resume here").
 
 ### 2026-09-15 (session 5, continued x2)
 - **The whole IPC surface landed.** `commands/router.rs` (capture + voice
