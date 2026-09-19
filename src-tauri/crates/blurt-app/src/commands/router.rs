@@ -125,6 +125,10 @@ fn capture_item_via_router_impl(state: &AppState, raw_text: &str) -> CommandResu
         },
     };
 
+    if let Some(indexer) = state.indexer() {
+        let item_id = crate::commands::parse_uuid(&outcome.item().id)?;
+        indexer.index_now(crate::indexer::IndexJob { item_id, edit_id: None });
+    }
     Ok(outcome)
 }
 
@@ -386,5 +390,22 @@ mod tests {
         let json = serde_json::to_value(&outcome).unwrap();
         assert_eq!(json["kind"], "resolved");
         assert!(json["item"]["id"].is_string());
+    }
+
+    #[test]
+    fn a_routed_capture_is_queued_for_immediate_indexing() {
+        let state = unlocked();
+        let (handle, mut requests) = crate::indexer::IndexerHandle::recording();
+        state.indexer.set(handle).unwrap();
+
+        let outcome = capture_item_via_router_impl(&state, "call the plumber").unwrap();
+
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            crate::indexer::Request::Now(crate::indexer::IndexJob {
+                item_id: outcome.item().id.parse().unwrap(),
+                edit_id: None,
+            })
+        );
     }
 }

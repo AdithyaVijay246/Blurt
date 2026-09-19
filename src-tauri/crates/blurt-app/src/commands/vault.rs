@@ -108,6 +108,14 @@ fn unlock_impl(state: &AppState, data_dir: &Path, passphrase: &str) -> CommandRe
     let keyring = Keyring::load(&path)?;
     let master = keyring.unwrap_with_passphrase(SlotKind::Passphrase, passphrase)?;
     let db = open_and_migrate(data_dir, &master)?;
+    // Catch-up (decided with the user 2026-09-19): whatever the in-memory
+    // indexing queue lost to a quit, a crash or a failed model load is
+    // re-queued here. Latest version only — see `pending_index_versions`.
+    if let Some(indexer) = state.indexer() {
+        for (item_id, edit_id) in blurt_schema::repository::indexing::pending_index_versions(db.conn())? {
+            indexer.index_now(crate::indexer::IndexJob { item_id, edit_id });
+        }
+    }
 
     *state.db.lock().unwrap() = Some(db);
     *state.keyring.lock().unwrap() = Some(keyring);
@@ -120,6 +128,9 @@ fn unlock_impl(state: &AppState, data_dir: &Path, passphrase: &str) -> CommandRe
 /// unwrapped master key only ever existed inside the `Database`, so dropping it
 /// is what actually re-locks — there is no separate key to zero here.
 fn lock_impl(state: &AppState) {
+    if let Some(indexer) = state.indexer() {
+        indexer.clear();
+    }
     *state.db.lock().unwrap() = None;
     *state.keyring.lock().unwrap() = None;
 }
@@ -370,5 +381,43 @@ mod tests {
         unlock_impl(&second, dir.path(), MASTER).unwrap();
 
         assert!(is_unlocked_impl(&second));
+    }
+
+    #[test]
+    fn unlocking_queues_every_item_whose_latest_version_was_never_indexed() {
+        let (state, dir) = vault();
+        initialize_vault_impl(&state, dir.path(), MASTER, SENSITIVE).unwrap();
+        let item = {
+            let guard = state.db.lock().unwrap();
+            blurt_schema::repository::items::capture(
+                guard.as_ref().unwrap().conn(),
+                destinations::UNSORTED_ID,
+                "captured, then the app quit before indexing",
+            )
+            .unwrap()
+        };
+        lock_impl(&state);
+        let (handle, mut requests) = crate::indexer::IndexerHandle::recording();
+        state.indexer.set(handle).unwrap();
+
+        unlock_impl(&state, dir.path(), MASTER).unwrap();
+
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            crate::indexer::Request::Now(crate::indexer::IndexJob { item_id: item.id, edit_id: None })
+        );
+        assert!(requests.try_recv().is_err(), "only the one pending version");
+    }
+
+    #[test]
+    fn locking_discards_queued_indexing() {
+        let (state, dir) = vault();
+        initialize_vault_impl(&state, dir.path(), MASTER, SENSITIVE).unwrap();
+        let (handle, mut requests) = crate::indexer::IndexerHandle::recording();
+        state.indexer.set(handle).unwrap();
+
+        lock_impl(&state);
+
+        assert_eq!(requests.try_recv().unwrap(), crate::indexer::Request::Clear);
     }
 }

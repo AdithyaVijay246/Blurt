@@ -5,12 +5,14 @@
 //! `rusqlite::Connection` that only exists once unlocked.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use blurt_rag::embedding::Embedder;
 use blurt_rag::model_manager::ModelManager;
 use blurt_rag::vectorstore::VectorStore;
 use blurt_schema::{Database, Keyring};
+
+use crate::indexer::IndexerHandle;
 
 /// Module 4's three long-lived handles.
 ///
@@ -54,6 +56,16 @@ pub struct AppState {
     /// caller can clone it out, release the lock, and then `await` or
     /// `spawn_blocking` without holding the state lock across either.
     pub rag: tokio::sync::Mutex<Option<std::sync::Arc<RagResources>>>,
+    /// Set once, by the app's `setup` hook, when the background worker starts.
+    /// Empty in unit tests that do not install one, in which case commands skip
+    /// queuing — so a missing worker can never make a capture fail.
+    pub indexer: OnceLock<IndexerHandle>,
+}
+
+impl AppState {
+    pub fn indexer(&self) -> Option<&IndexerHandle> {
+        self.indexer.get()
+    }
 }
 
 #[cfg(test)]
@@ -68,6 +80,7 @@ mod tests {
         let state = AppState::default();
         assert!(state.db.lock().unwrap().is_none());
         assert!(state.keyring.lock().unwrap().is_none());
+        assert!(state.indexer().is_none());
     }
 
     #[tokio::test]

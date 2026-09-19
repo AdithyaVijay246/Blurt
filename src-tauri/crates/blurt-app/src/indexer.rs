@@ -200,6 +200,45 @@ fn rag_error(e: blurt_rag::RagError) -> CommandError {
     CommandError::Io(e.to_string())
 }
 
+/// Event name for an item finishing indexing — `MODULE_01_ARCHITECTURE.md` §3
+/// names exactly this ("an embedding finishing indexing") as a push event.
+pub const ITEM_INDEXED_EVENT: &str = "item-indexed";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ItemIndexedDto {
+    pub item_id: String,
+    pub edit_id: Option<String>,
+}
+
+/// The app's runner: [`run_job`], then tell the frontend.
+///
+/// A failure has nowhere to go — the command that queued this returned long
+/// ago — so it is written to stderr and otherwise dropped. The catch-up pass on
+/// the next unlock retries it. (The codebase has no logging setup yet; this is
+/// the one place that would use it.)
+pub async fn run_and_announce(app: &tauri::AppHandle, job: IndexJob) {
+    use tauri::{Emitter, Manager};
+
+    let state = app.state::<AppState>();
+    let result = match crate::commands::vault::rag_paths(app) {
+        Ok(paths) => run_job(state.inner(), &paths, job).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(IndexOutcome::Indexed { .. }) => {
+            let _ = app.emit(
+                ITEM_INDEXED_EVENT,
+                ItemIndexedDto {
+                    item_id: job.item_id.to_string(),
+                    edit_id: job.edit_id.map(|e| e.to_string()),
+                },
+            );
+        }
+        Ok(IndexOutcome::Skipped) => {}
+        Err(e) => eprintln!("indexing item {} failed: {e:?}", job.item_id),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

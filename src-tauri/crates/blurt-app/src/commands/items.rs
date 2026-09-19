@@ -16,6 +16,9 @@ fn capture_item_impl(state: &AppState, destination_id: String, text: String) -> 
     let guard = state.db.lock().unwrap();
     let db = guard.as_ref().ok_or(CommandError::Locked)?;
     let captured = items::capture(db.conn(), destination_id, &text)?;
+    if let Some(indexer) = state.indexer() {
+        indexer.index_now(crate::indexer::IndexJob { item_id: captured.id, edit_id: None });
+    }
     Ok(captured.into())
 }
 
@@ -198,5 +201,23 @@ mod tests {
         let items = list_items_for_destination_impl(&state, destination_id).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, keep.id);
+    }
+
+    #[test]
+    fn capturing_queues_the_item_for_immediate_indexing() {
+        let state = unlocked_state();
+        let (handle, mut requests) = crate::indexer::IndexerHandle::recording();
+        state.indexer.set(handle).unwrap();
+        let destination = a_destination(&state);
+
+        let item = capture_item_impl(&state, destination, "oat milk".into()).unwrap();
+
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            crate::indexer::Request::Now(crate::indexer::IndexJob {
+                item_id: item.id.parse().unwrap(),
+                edit_id: None,
+            })
+        );
     }
 }

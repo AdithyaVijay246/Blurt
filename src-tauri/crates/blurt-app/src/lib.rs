@@ -19,6 +19,20 @@ pub mod state;
 pub fn builder() -> tauri::Builder<tauri::Wry> {
     tauri::Builder::default()
         .manage(state::AppState::default())
+        .setup(|app| {
+            use tauri::Manager;
+
+            // The worker runs on Tauri's own runtime; `tokio::spawn` would panic
+            // here, since `setup` is not inside a runtime context.
+            let handle = app.handle().clone();
+            let (indexer, worker) = indexer::new_indexer(move |job| {
+                let app = handle.clone();
+                async move { indexer::run_and_announce(&app, job).await }
+            });
+            tauri::async_runtime::spawn(worker);
+            let _ = app.state::<state::AppState>().indexer.set(indexer);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::vault::initialize_vault,
             commands::vault::unlock,

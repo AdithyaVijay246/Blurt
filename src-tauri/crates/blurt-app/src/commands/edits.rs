@@ -16,6 +16,9 @@ fn append_edit_impl(state: &AppState, item_id: String, text: String) -> CommandR
     let guard = state.db.lock().unwrap();
     let db = guard.as_ref().ok_or(CommandError::Locked)?;
     let edit = edits::append(db.conn(), item_id, &text)?;
+    if let Some(indexer) = state.indexer() {
+        indexer.index_after_quiet(crate::indexer::IndexJob { item_id, edit_id: Some(edit.id) });
+    }
     Ok(edit.into())
 }
 
@@ -101,5 +104,23 @@ mod tests {
         let state = unlocked_state();
         let item_id = an_item(&state);
         assert!(item_edit_history_impl(&state, item_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_edit_is_queued_to_wait_for_the_quiet_period_not_run_immediately() {
+        let state = unlocked_state();
+        let item_id = an_item(&state);
+        let (handle, mut requests) = crate::indexer::IndexerHandle::recording();
+        state.indexer.set(handle).unwrap();
+
+        let edit = append_edit_impl(&state, item_id.clone(), "oat milk".into()).unwrap();
+
+        assert_eq!(
+            requests.try_recv().unwrap(),
+            crate::indexer::Request::AfterQuiet(crate::indexer::IndexJob {
+                item_id: item_id.parse().unwrap(),
+                edit_id: Some(edit.id.parse().unwrap()),
+            })
+        );
     }
 }
