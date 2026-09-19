@@ -54,6 +54,61 @@ pub fn is_item_indexable(conn: &Connection, item_id: uuid::Uuid) -> Result<bool>
     Ok(eligible > 0)
 }
 
+/// One text version still waiting to be indexed: the item, and which version
+/// of it — `None` for the original capture, `Some(edit_id)` for that edit.
+pub type PendingVersion = (uuid::Uuid, Option<uuid::Uuid>);
+
+/// Every indexable item whose **latest** version has no embeddings yet.
+///
+/// Drives `blurt-app`'s catch-up pass on unlock. Module 4 §3 queues indexing
+/// as a background job, and an in-memory queue loses jobs to a quit, a crash,
+/// or an embedding model that failed to load; without this, any such item would
+/// stay unsearchable until it happened to be edited again.
+///
+/// Only the latest version is reported. §3's debounce deliberately leaves the
+/// intermediate versions of a burst of edits unembedded, and from here those
+/// are indistinguishable from versions that were lost — so backfilling them
+/// would undo the debounce.
+///
+/// "Latest" breaks `editedAt` ties by `rowid`, the same rule
+/// [`super::edits::history_for_item`] uses. Same sensitive-safe filter as
+/// [`items_for_indexing`]: sensitive and tombstoned items are never reported.
+pub fn pending_index_versions(conn: &Connection) -> Result<Vec<PendingVersion>> {
+    // The latest-edit subquery appears twice rather than via a column alias,
+    // because referencing a SELECT alias inside WHERE is a SQLite extension.
+    //
+    // `em.editId IS (...)` is deliberate: `IS` treats NULL as equal to NULL,
+    // which is what matches an original-capture embedding (editId NULL) against
+    // an item that has no edits at all.
+    let mut stmt = conn.prepare(
+        "SELECT items.id,
+                (SELECT e.id FROM edits e WHERE e.itemId = items.id
+                 ORDER BY e.editedAt DESC, e.rowid DESC LIMIT 1) AS latestEdit
+         FROM items
+         JOIN destinations ON destinations.id = items.destinationId
+         WHERE items.deletedAt IS NULL
+           AND destinations.deletedAt IS NULL
+           AND destinations.isSensitive = 0
+           AND NOT EXISTS (
+               SELECT 1 FROM embeddings em
+               WHERE em.itemId = items.id
+                 AND em.editId IS (SELECT e.id FROM edits e WHERE e.itemId = items.id
+                                   ORDER BY e.editedAt DESC, e.rowid DESC LIMIT 1))
+         ORDER BY items.createdAt ASC, items.rowid ASC",
+    )?;
+    let pending = stmt
+        .query_map([], |row| {
+            let item: String = row.get(0)?;
+            let edit: Option<String> = row.get(1)?;
+            Ok((
+                uuid::Uuid::parse_str(&item).expect("items.id is always a UUID"),
+                edit.map(|e| uuid::Uuid::parse_str(&e).expect("edits.id is always a UUID")),
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(pending)
+}
+
 /// Stores one indexing pass's output — chunk rows and tags — atomically.
 ///
 /// Module 4 writes its LanceDB vectors first and calls this second. The two
@@ -286,5 +341,89 @@ mod tests {
             vec!["original".to_string()],
             "the tag replacement must roll back with the chunk insert"
         );
+    }
+
+    fn list(db: &Database, name: &str, trigger: &str, sensitive: bool) -> uuid::Uuid {
+        destinations::create(db.conn(), name, trigger, DestinationKind::List, None, false, sensitive, 0)
+            .unwrap()
+            .id
+    }
+
+    /// Records one chunk for a version, as a finished indexing pass would.
+    fn mark_indexed(db: &Database, item_id: uuid::Uuid, edit_id: Option<uuid::Uuid>) {
+        crate::repository::embeddings::insert_many(
+            db.conn(),
+            &[crate::repository::embeddings::Embedding {
+                id: uuid::Uuid::new_v4(),
+                item_id,
+                edit_id,
+                vector_ref: uuid::Uuid::new_v4().to_string(),
+                chunk_index: 0,
+                chunk_start_offset: 0,
+                chunk_end_offset: 1,
+            }],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_unindexed_capture_is_pending_as_its_original() {
+        let db = migrated();
+        let shop = list(&db, "Shopping", "shop", false);
+        let item = items::capture(db.conn(), shop, "oat milk").unwrap();
+
+        assert_eq!(pending_index_versions(db.conn()).unwrap(), vec![(item.id, None)]);
+    }
+
+    #[test]
+    fn an_indexed_original_is_not_pending() {
+        let db = migrated();
+        let shop = list(&db, "Shopping", "shop", false);
+        let item = items::capture(db.conn(), shop, "oat milk").unwrap();
+        mark_indexed(&db, item.id, None);
+
+        assert!(pending_index_versions(db.conn()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unindexed_edit_is_pending_even_when_the_original_was_indexed() {
+        let db = migrated();
+        let shop = list(&db, "Shopping", "shop", false);
+        let item = items::capture(db.conn(), shop, "milk").unwrap();
+        mark_indexed(&db, item.id, None);
+        let edit = crate::repository::edits::append(db.conn(), item.id, "oat milk").unwrap();
+
+        assert_eq!(pending_index_versions(db.conn()).unwrap(), vec![(item.id, Some(edit.id))]);
+    }
+
+    /// Two edits appended back to back usually share a millisecond, so this also
+    /// exercises the rowid tiebreak.
+    #[test]
+    fn only_the_latest_edit_is_reported_never_an_intermediate_one() {
+        let db = migrated();
+        let shop = list(&db, "Shopping", "shop", false);
+        let item = items::capture(db.conn(), shop, "milk").unwrap();
+        let _first = crate::repository::edits::append(db.conn(), item.id, "oat milk").unwrap();
+        let second = crate::repository::edits::append(db.conn(), item.id, "oat milk, 2 cartons").unwrap();
+
+        assert_eq!(pending_index_versions(db.conn()).unwrap(), vec![(item.id, Some(second.id))]);
+
+        mark_indexed(&db, item.id, Some(second.id));
+        assert!(
+            pending_index_versions(db.conn()).unwrap().is_empty(),
+            "the skipped intermediate edit must not be backfilled"
+        );
+    }
+
+    #[test]
+    fn sensitive_and_tombstoned_items_are_never_pending() {
+        let db = migrated();
+        let secret = list(&db, "Passwords", "pw", true);
+        let shop = list(&db, "Shopping", "shop", false);
+        items::capture(db.conn(), secret, "gmail: hunter2").unwrap();
+        let gone = items::capture(db.conn(), shop, "old").unwrap();
+        items::tombstone(db.conn(), gone.id).unwrap();
+
+        assert!(pending_index_versions(db.conn()).unwrap().is_empty());
     }
 }
