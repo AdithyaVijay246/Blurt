@@ -9,6 +9,7 @@
 pub mod commands;
 pub mod dto;
 pub mod error;
+pub mod indexer;
 pub mod state;
 
 /// Builds the Tauri application. The host binary (`src-tauri/src/main.rs`)
